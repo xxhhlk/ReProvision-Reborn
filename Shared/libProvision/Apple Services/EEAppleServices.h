@@ -34,6 +34,8 @@ typedef enum : NSUInteger {
 
 - (void)requestTwoFactorLoginCodeWithCompletionHandler:(void (^)(NSError *))completion;
 
+- (BOOL)hasActiveTwoFactorSession;
+
 - (void)validateLoginCode:(NSString *)code andCompletionHandler:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler;
 
 - (void)fallback2FACodeRequest:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler;

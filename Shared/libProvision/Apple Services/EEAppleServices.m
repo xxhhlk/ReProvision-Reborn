@@ -251,30 +251,22 @@ NSString *const REProtocolVersion = @"QH65B2";
 
         self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        // RPVAccountChecker owns team discovery and its retry policy. Running a
+        // second listTeams here can consume the fresh session and surface
+        // "Your session has expired".
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, self.credentials);
     }];
 }
 
 - (void)requestTwoFactorLoginCodeWithCompletionHandler:(void (^)(NSError *))completion {
     [self.authentication requestLoginCodeWithCompletion:completion];
+}
+
+- (BOOL)hasActiveTwoFactorSession {
+    return [self.authentication hasActiveTwoFactorSession];
 }
 
 - (void)validateLoginCode:(NSString *)code andCompletionHandler:(void (^)(NSError *, NSDictionary *, NSURLCredential *))completionHandler {
@@ -302,25 +294,11 @@ NSString *const REProtocolVersion = @"QH65B2";
 
         self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        // Avoid duplicating the team lookup performed by RPVAccountChecker.
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, self.credentials);
     }];
 }
 
@@ -349,25 +327,11 @@ NSString *const REProtocolVersion = @"QH65B2";
 
         self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
 
-        // Do a request to listTeams.action to check that the user is a member of a team
-        [self listTeamsWithCompletionHandler:^(NSError *error, NSDictionary *plist) {
-            NSArray *teams = [plist objectForKey:@"teams"];
-
-            if (!teams) {
-                // Error of some kind?
-                // TODO: HANDLE ME
-
-                completionHandler(error, plist, nil);
-                return;
-            }
-
-            NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
-
-            [resultDictionary setObject:@"" forKey:@"userString"];
-            [resultDictionary setObject:@"authenticated" forKey:@"reason"];
-
-            completionHandler(nil, resultDictionary, self.credentials);
-        }];
+        // Avoid duplicating the team lookup performed by RPVAccountChecker.
+        NSMutableDictionary *resultDictionary = [NSMutableDictionary dictionary];
+        [resultDictionary setObject:@"" forKey:@"userString"];
+        [resultDictionary setObject:@"authenticated" forKey:@"reason"];
+        completionHandler(nil, resultDictionary, self.credentials);
     }];
 }
 

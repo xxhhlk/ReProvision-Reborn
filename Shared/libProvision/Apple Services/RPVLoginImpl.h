@@ -13,6 +13,8 @@
 #define RPVInternalLogin2FARequiredTrustedDeviceError 4010
 #define RPVInternalLogin2FARequiredSecondaryAuthError 4011
 #define RPVInternalLoginIncorrect2FACodeError 4012
+#define RPVInternalLoginInvalid2FAFormatError 4013
+#define RPVInternalLoginPostTwoFactorError 4014
 
 // Block definitions
 typedef void (^RPVLoginResultBlock)(NSError *error, NSString *userIdentity, NSString *gsToken, NSString *idmsToken);

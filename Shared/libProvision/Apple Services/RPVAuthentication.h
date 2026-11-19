@@ -26,6 +26,12 @@
 - (void)requestLoginCodeWithCompletion:(void(^)(NSError*))completionHandler;
 
 /**
+ Returns whether the current one-time 2FA context can still request or submit
+ a verification code.
+ */
+- (BOOL)hasActiveTwoFactorSession;
+
+/**
  Requests a login code via direct AuthKit calls
  */
 - (void)fallback2FACodeRequest:(void(^)(NSError *error, NSString *userIdentity, NSString *gsToken))completionHandler;

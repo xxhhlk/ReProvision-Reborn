@@ -240,6 +240,39 @@ static NSData *createAppTokensChecksum(NSData *sk, NSString *adsid, NSArray<NSSt
     return data;
 }
 
+static NSInteger RPVDecimalDigitValue(unichar character) {
+    // Convert localized keypad and AutoFill digits to the ASCII form Apple expects.
+    static const unichar digitBlockStarts[] = {
+        0x0030, 0x0660, 0x06F0, 0x07C0, 0x0966, 0x09E6, 0x0A66,
+        0x0AE6, 0x0B66, 0x0BE6, 0x0C66, 0x0CE6, 0x0D66, 0x0DE6,
+        0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x1090, 0x17E0, 0x1810,
+        0x1946, 0x19D0, 0x1A80, 0x1A90, 0x1B50, 0x1BB0, 0x1C40,
+        0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50,
+        0xABF0, 0xFF10
+    };
+
+    for (NSUInteger index = 0;
+         index < sizeof(digitBlockStarts) / sizeof(digitBlockStarts[0]);
+         index++) {
+        unichar start = digitBlockStarts[index];
+        if (character >= start && character <= start + 9) {
+            return character - start;
+        }
+    }
+    return NSNotFound;
+}
+
+static NSString *RPVNormalizedVerificationCode(NSString *code) {
+    NSMutableString *result = [NSMutableString stringWithCapacity:6];
+    for (NSUInteger index = 0; index < code.length; index++) {
+        NSInteger digit = RPVDecimalDigitValue([code characterAtIndex:index]);
+        if (digit != NSNotFound) {
+            [result appendFormat:@"%ld", (long)digit];
+        }
+    }
+    return result;
+}
+
 @interface RPVLoginImpl ()
 
 @property (nonatomic, strong) NSDictionary *lookupURLs;
@@ -636,16 +669,19 @@ static NSData *createAppTokensChecksum(NSData *sk, NSString *adsid, NSArray<NSSt
             }
             
             NSDictionary *completeResponseStatus = [completeResponse objectForKey:@"Status"];
+            NSInteger completeStatusCode = [[completeResponseStatus objectForKey:@"ec"] integerValue];
+            NSString *outerAuthenticationMode = [completeResponseStatus objectForKey:@"au"];
+            BOOL outerResponseRequiresTwoFactor = outerAuthenticationMode.length > 0 || completeStatusCode == 409;
             if ([completeResponseStatus objectForKey:@"ec"] &&
-                [[completeResponseStatus objectForKey:@"ec"] intValue] != 0) {
+                completeStatusCode != 0) {
                 // Don't error out just yet if 2FA has been requested
                 // We need the idms token for that to be handled correctly
-                
-                if ([completeResponseStatus objectForKey:@"au"]) {
+
+                if (outerResponseRequiresTwoFactor) {
                     // Ignore the error for now, because authentication is still required
                 } else {
-                    NSError *responseError = [self createError:[completeResponseStatus objectForKey:@"em"]
-                                                              :[[completeResponseStatus objectForKey:@"ec"] intValue]];
+                    NSString *message = [completeResponseStatus objectForKey:@"em"] ?: @"Apple rejected the authentication request";
+                    NSError *responseError = [self createError:message :(int)completeStatusCode];
                     completionHandler(responseError, nil, nil, nil);
                     return;
                 }
@@ -742,22 +778,41 @@ static NSData *createAppTokensChecksum(NSData *sk, NSString *adsid, NSArray<NSSt
 
             NSString *adsid = decryptedDict[@"adsid"];
             NSString *acname = decryptedDict[@"acname"];
-            NSString *altDSID = [NSString stringWithFormat:@"%@|%@", adsid, acname];
-
             NSString *idmsToken = decryptedDict[@"GsIdmsToken"];
-            
+
+            if (adsid.length == 0 || idmsToken.length == 0) {
+                NSError *error = [self createError:@"Apple returned an incomplete authentication session"
+                                                   :RPVInternalLoginError];
+                completionHandler(error, nil, nil, nil);
+                return;
+            }
+
+            // Some responses omit acname; use the SRP username as the fallback.
+            NSString *accountName = acname.length > 0 ? acname : username;
+            NSString *altDSID = [NSString stringWithFormat:@"%@|%@", adsid, accountName];
+
             log_debug("IDMS Token: %s", idmsToken.UTF8String);
-            
+
+            // Apple may describe 2FA in either the outer or decrypted response.
+            NSInteger decryptedStatusCode = [decryptedDict[@"status-code"] integerValue];
+            NSString *decryptedAuthenticationMode = [decryptedDict[@"url"] isKindOfClass:[NSString class]]
+                ? decryptedDict[@"url"]
+                : nil;
+            BOOL requiresTwoFactor = outerResponseRequiresTwoFactor || decryptedStatusCode == 409;
+
             // At this point, check if 2FA is required. If so, return with the idms token and adsid
-            if ([completeResponseStatus objectForKey:@"au"]) {
-                
-                int mode = [[completeResponseStatus objectForKey:@"au"] isEqualToString:@"trustedDeviceSecondaryAuth"] ?
+            if (requiresTwoFactor) {
+                NSString *authenticationMode = outerAuthenticationMode.length > 0
+                    ? outerAuthenticationMode
+                    : decryptedAuthenticationMode;
+
+                int mode = [authenticationMode isEqualToString:@"trustedDeviceSecondaryAuth"] || authenticationMode.length == 0 ?
                     RPVInternalLogin2FARequiredTrustedDeviceError :
                     RPVInternalLogin2FARequiredSecondaryAuthError;
-                
-                NSError *responseError = [self createError:[completeResponseStatus objectForKey:@"em"]
-                                                          :mode];
-                
+
+                NSString *message = [completeResponseStatus objectForKey:@"em"] ?: @"Two-factor authentication is required";
+                NSError *responseError = [self createError:message :mode];
+
                 completionHandler(responseError, altDSID, nil, idmsToken);
             } else {
             
@@ -987,7 +1042,15 @@ static NSData *createAppTokensChecksum(NSData *sk, NSString *adsid, NSArray<NSSt
 }
 
 - (void)submitTwoFactorCode:(NSString*)code withUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(RPVTwoFactorResultBlock)completionHandler {
-    
+
+    // Localized/AutoFill digits must be normalized to ASCII before submission.
+    NSString *normalizedCode = RPVNormalizedVerificationCode(code ?: @"");
+    if (normalizedCode.length != 6) {
+        completionHandler([self createError:@"The verification code must contain exactly six digits"
+                                           :RPVInternalLoginInvalid2FAFormatError]);
+        return;
+    }
+
     // Parse the real dsid out of the identity
     NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
     
@@ -1009,7 +1072,7 @@ static NSData *createAppTokensChecksum(NSData *sk, NSString *adsid, NSArray<NSSt
     
     // Sort out headers
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
-        @"security-code": code,
+        @"security-code": normalizedCode,
         @"Content-Type": @"text/x-xml-plist",
         @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
         @"Accept": @"text/x-xml-plist",
