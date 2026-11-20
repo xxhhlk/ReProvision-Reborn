@@ -558,7 +558,7 @@ function readDefaultsValue() # args: plistPath, propertyName
 	local propertyName="$2"
 	local value
 	
-	value=`defaults read "${plistPath%.*}" "$propertyName"` || \
+	value=`/usr/libexec/PlistBuddy -c "Print :$propertyName" "$plistPath"` || \
 		panic $? "Failed to read defaults property $propertyName from $plistPath"
 
 	# return #
