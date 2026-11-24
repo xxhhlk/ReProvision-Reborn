@@ -14,6 +14,7 @@
 @end
 
 @interface RPVSplitViewMasterTableViewController ()
+@property (nonatomic) BOOL hasPromptedForSignIn;
 @end
 
 @implementation RPVSplitViewMasterTableViewController
@@ -42,11 +43,16 @@
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userDidRequestAccountViewController:) name:@"RPVDisplayAccountSignInController" object:nil];
     
     // Check if we need to present the account view based upon settings.
-    // Check if we need to present the account view based upon settings.
-    if (![RPVResources getUsername] ||
-        [[RPVResources getUsername] isEqualToString:@""] ||
-        ![[RPVResources getCredentialsVersion] isEqualToString:CURRENT_CREDENTIALS_VERSION])
-        [self presentAccountViewControllerAnimated:YES];
+    // Only auto-present once per launch; otherwise dismissing the sign-in
+    // screen (e.g. via Skip) would immediately present it again.
+    if (!self.hasPromptedForSignIn) {
+        self.hasPromptedForSignIn = YES;
+
+        if (![RPVResources getUsername] ||
+            [[RPVResources getUsername] isEqualToString:@""] ||
+            ![[RPVResources getCredentialsVersion] isEqualToString:CURRENT_CREDENTIALS_VERSION])
+            [self presentAccountViewControllerAnimated:YES];
+    }
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
