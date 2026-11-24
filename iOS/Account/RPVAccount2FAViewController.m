@@ -16,6 +16,7 @@
 @property (nonatomic, strong) NSString *emailAddress;
 @property (nonatomic, strong) NSArray *_interimTeamIDArray;
 @property (nonatomic, strong) NSURLCredential *credentials;
+@property (nonatomic) NSDate *lastFallbackTriggerTime;
 
 @end
 
@@ -38,6 +39,30 @@
         self.titleLabel.textColor = [UIColor blackColor];
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
+
+    // AuthKit opens the Settings app to complete 2FA and does not return
+    // automatically. Listen for the app becoming active again so the
+    // authentication flow can resume when the user switches back.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                               selector:@selector(applicationDidBecomeActive:)
+                                                   name:UIApplicationDidBecomeActiveNotification
+                                                 object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    // Re-trigger the fallback authentication when the app returns to the
+    // foreground. Deduplicate against the viewWillAppear trigger to avoid
+    // firing the request twice in quick succession.
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (self.lastFallbackTriggerTime && (now - [self.lastFallbackTriggerTime timeIntervalSince1970]) < 1.0) {
+        return;
+    }
+    self.lastFallbackTriggerTime = [NSDate date];
+    [self didTapFallbackButton:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
