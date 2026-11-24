@@ -88,6 +88,22 @@ static dispatch_once_t nanoRegistryOnceToken;
     return interval;
 }
 
++ (NSString *)anisetteServerURL {
+    NSString *url = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
+    if (url.length == 0) {
+        return @"https://ani.jkcoxson.com";
+    }
+    return url;
+}
+
++ (void)setAnisetteServerURL:(NSString *)url {
+    NSString *trimmed = [url stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) {
+        trimmed = @"https://ani.jkcoxson.com";
+    }
+    [self setPreferenceValue:trimmed forKey:@"anisetteServerURL" withNotification:nil];
+}
+
 + (id)preferenceValueForKey:(NSString *)key {
     return [[NSUserDefaults standardUserDefaults] objectForKey:key];
 }

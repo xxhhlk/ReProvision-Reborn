@@ -276,6 +276,8 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 @interface RPVLoginImpl ()
 
 @property (nonatomic, strong) NSDictionary *lookupURLs;
+@property (nonatomic, strong) NSDictionary *remoteAnisetteCache;
+@property (nonatomic, assign) NSTimeInterval remoteAnisetteCacheTime;
 
 #if TARGET_OS_IOS
 @property (nonatomic, readwrite) struct ccrng_state *rngState;
@@ -346,7 +348,49 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_NOW);
 }
 
+- (NSDictionary *)_remoteAnisetteHeaders {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (self.remoteAnisetteCache && (now - self.remoteAnisetteCacheTime) < 5.0) {
+        return self.remoteAnisetteCache;
+    }
+
+    NSString *urlString = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
+    if (urlString.length == 0) {
+        urlString = @"https://ani.jkcoxson.com";
+    }
+
+    NSError *error = nil;
+    NSURLResponse *response = nil;
+    NSData *data = [NSURLConnection sendSynchronousRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:urlString]]
+                                              returningResponse:&response
+                                                              error:&error];
+
+    if (error || !data || data.length == 0) {
+        return nil;
+    }
+
+    NSDictionary *headers = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error || !headers) {
+        return nil;
+    }
+
+    // Keep the GSA request's client info consistent with the remote server.
+    NSString *remoteClientInfo = headers[@"X-MMe-Client-Info"];
+    if (remoteClientInfo.length > 0) {
+        self.clientInfoOverride = remoteClientInfo;
+    }
+
+    self.remoteAnisetteCache = headers;
+    self.remoteAnisetteCacheTime = now;
+    return headers;
+}
+
 - (NSDictionary *)_anisetteData {
+    NSDictionary *remoteHeaders = [self _remoteAnisetteHeaders];
+    if (remoteHeaders) {
+        return remoteHeaders;
+    }
+
     NSDateFormatter *formatter = [NSDateFormatter new];
     formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     formatter.calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
@@ -381,6 +425,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     //
     // In fact, the only X-whatever key required here is the device X-Mme-Device-Id
     // (which I believe must match that of a provisioned device)
+
+    // When a remote anisette server is active, its headers already carry the
+    // device identity. Do not let local device data override it.
+    if (self.remoteAnisetteCache) {
+        return @{};
+    }
 
     [self _ensureAuthKitAvailable];
     

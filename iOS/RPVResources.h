@@ -26,6 +26,9 @@
 + (BOOL)shouldAutoRevokeIfNeeded;
 + (NSTimeInterval)heartbeatTimerInterval;
 
++ (NSString *)anisetteServerURL;
++ (void)setAnisetteServerURL:(NSString *)url;
+
 + (id)preferenceValueForKey:(NSString *)key;
 + (void)setPreferenceValue:(id)value forKey:(NSString *)key withNotification:(NSString *)notification;
 
