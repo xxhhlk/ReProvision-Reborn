@@ -61,15 +61,11 @@
     
     // 2FA is handled internally by this implementation
     [self.authenticationController authenticateWithContext:self.currentContext completion:^(id result, id error) {
-        NSLog(@"AUTHENTICATE WITH CONTEXT: %@, %@", result, error);
-        
         if (error) {
+            NSLog(@"AuthKit authentication failed: %@", [error localizedDescription]);
             completionHandler(error, nil, nil);
             return;
         }
-        
-        NSDictionary* IDMSToken = [[result objectForKey:@"AKIDMSToken"] isKindOfClass:[NSDictionary class]] ? [result objectForKey:@"AKIDMSToken"] : nil;
-        NSString* AKAltDSID = [result objectForKey:@"AKAltDSID"];
 
         id AKUsernameObj = [result objectForKey:@"AKUsername"];
         NSString* AKUsername = [AKUsernameObj isKindOfClass:[NSString class]] ? AKUsernameObj : nil;
@@ -79,25 +75,16 @@
         }
         if (AKUsername.length == 0) AKUsername = @"unknown";
 
+        NSString* AKAltDSID = [result objectForKey:@"AKAltDSID"];
+        NSDictionary* IDMSToken = [result objectForKey:@"AKIDMSToken"];
+
+        // The token from AuthKit only signals that the on-device 2FA step
+        // completed; the real com.apple.gs.xcode.auth token is obtained by
+        // re-running the SRP login afterwards. Do not fail here when the
+        // scope is appleid.auth only - that is expected on older iOS.
         NSString* GSToken = [IDMSToken objectForKey:@"com.apple.gs.xcode.auth"];
-        if (GSToken.length == 0) {
-            GSToken = [IDMSToken objectForKey:@"com.apple.gs.appleid.auth"];
-        }
-        if (GSToken.length == 0) {
-            NSArray *vals = [IDMSToken allValues];
-            if (vals.count == 1 && [[vals firstObject] isKindOfClass:[NSString class]]) {
-                GSToken = [vals firstObject];
-            }
-        }
-        NSLog(@"[DIAG] fallback tokens keys=%@ gsTokenLen=%lu altDSID=%@ user=%@", [IDMSToken.allKeys componentsJoinedByString:@","], (unsigned long)GSToken.length, AKAltDSID, AKUsername);
-
-        if (GSToken.length == 0) {
-            NSError *tokenErr = [NSError errorWithDomain:@"RPVLoginFallback" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Apple did not return an app token for this account. Please sign in again from Settings."}];
-            completionHandler(tokenErr, nil, nil);
-            return;
-        }
-
         NSString* username = [[NSString alloc] initWithFormat:@"%@|%@", AKAltDSID ?: @"", AKUsername];
+
         completionHandler(nil, username, GSToken);
     }];
 }

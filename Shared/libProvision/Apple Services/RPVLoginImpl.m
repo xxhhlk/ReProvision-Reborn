@@ -347,6 +347,14 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 }
 
 - (NSDictionary *)_remoteAnisetteHeaders {
+    // Remote anisette is only used on iOS 17+. On older systems the device's
+    // own AuthKit keeps the login, 2FA, and token-issuance identities
+    // consistent; a remote identity would diverge from the on-device 2FA
+    // session and make an otherwise valid login look expired.
+    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
+    if (![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion]) {
+        return nil;
+    }
     static NSDictionary *cachedHeaders = nil;
     static NSDate *cachedAt = nil;
     @synchronized (self) {

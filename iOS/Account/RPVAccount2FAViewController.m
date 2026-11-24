@@ -54,9 +54,15 @@
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
-    // Re-trigger the fallback authentication when the app returns to the
-    // foreground. Deduplicate against the viewWillAppear trigger to avoid
-    // firing the request twice in quick succession.
+    // Only re-trigger when the 2FA session is still intact. After a successful
+    // fallback login the cached credentials are cleared; re-running then would
+    // make AuthKit prompt for an empty username and loop forever.
+    if (![[RPVAccountChecker sharedInstance] hasActiveTwoFactorSession]) {
+        return;
+    }
+
+    // Deduplicate against the viewWillAppear trigger to avoid firing the
+    // request twice in quick succession.
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     if (self.lastFallbackTriggerTime && (now - [self.lastFallbackTriggerTime timeIntervalSince1970]) < 1.0) {
         return;

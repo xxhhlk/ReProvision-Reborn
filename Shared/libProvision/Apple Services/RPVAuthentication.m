@@ -192,21 +192,18 @@
 
     NSString *username = [self.cachedUserIdentityFor2FA componentsSeparatedByString:@"|"].lastObject;
     NSString *password = [self.cachedUserPasswordFor2FA copy];
-    NSLog(@"[DIAG] fallback2FA start userLen=%lu pwdLen=%lu", (unsigned long)username.length, (unsigned long)password.length);
 
-    [self.fallbackImpl loginWithUsername:username ?: @"" password:password completion:^(NSError *error, NSString *userIdentity, NSString *gsToken) {
-        if (!error && userIdentity.length > 0 && gsToken.length > 0) {
-            NSLog(@"[DIAG] fallback2FA success, using AuthKit token directly");
-            [self _clearTwoFactorSession];
-            completionHandler(nil, userIdentity, gsToken);
-            return;
-        }
-        if (error) {
+    // AuthKit only completes the on-device 2FA step; the token it returns is
+    // scoped to com.apple.gs.appleid.auth, which Developer Services rejects.
+    // Once 2FA is dealt with, run the real SRP login again to obtain a
+    // com.apple.gs.xcode.auth token. authenticateWithUsername: clears the
+    // cached 2FA session, so the become-active guard will not re-trigger.
+    [self.fallbackImpl loginWithUsername:username password:password completion:^(NSError *error, NSString *userIdentity, NSString *gsToken) {
+        if (!error) {
+            [self authenticateWithUsername:username password:password withCompletion:completionHandler];
+        } else {
             completionHandler(error, nil, nil);
-            return;
         }
-        NSError *incomplete = [NSError errorWithDomain:@"RPVAuthentication" code:-4 userInfo:@{NSLocalizedDescriptionKey: @"Sign-in did not return a usable token. Please try again."}];
-        completionHandler(incomplete, nil, nil);
     }];
 }
 
