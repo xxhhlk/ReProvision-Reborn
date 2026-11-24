@@ -191,14 +191,22 @@
 - (void)fallback2FACodeRequest:(void(^)(NSError *error, NSString *userIdentity, NSString *gsToken))completionHandler {
 
     NSString *username = [self.cachedUserIdentityFor2FA componentsSeparatedByString:@"|"].lastObject;
+    NSString *password = [self.cachedUserPasswordFor2FA copy];
+    NSLog(@"[DIAG] fallback2FA start userLen=%lu pwdLen=%lu", (unsigned long)username.length, (unsigned long)password.length);
 
-    [self.fallbackImpl loginWithUsername:username password:self.cachedUserPasswordFor2FA completion:^(NSError *error, NSString *userIdentity, NSString *gsToken) {
-        if (!error) {
-            // Do real login again now that 2FA is dealt with
-            [self authenticateWithUsername:username password:self.cachedUserPasswordFor2FA withCompletion:completionHandler];
-        } else {
-            completionHandler(error, nil, nil);
+    [self.fallbackImpl loginWithUsername:username ?: @"" password:password completion:^(NSError *error, NSString *userIdentity, NSString *gsToken) {
+        if (!error && userIdentity.length > 0 && gsToken.length > 0) {
+            NSLog(@"[DIAG] fallback2FA success, using AuthKit token directly");
+            [self _clearTwoFactorSession];
+            completionHandler(nil, userIdentity, gsToken);
+            return;
         }
+        if (error) {
+            completionHandler(error, nil, nil);
+            return;
+        }
+        NSError *incomplete = [NSError errorWithDomain:@"RPVAuthentication" code:-4 userInfo:@{NSLocalizedDescriptionKey: @"Sign-in did not return a usable token. Please try again."}];
+        completionHandler(incomplete, nil, nil);
     }];
 }
 

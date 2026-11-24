@@ -289,7 +289,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     self = [super init];
     
     if (self) {
-        self.clientInfoOverride = @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+        self.clientInfoOverride = @"<iPhone12,8> <iPhone OS;13.4.1;17E8258> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
         
 #if TARGET_OS_IOS
         // Create rng pointer
@@ -346,7 +346,47 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     dlopen("/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit", RTLD_NOW);
 }
 
+- (NSDictionary *)_remoteAnisetteHeaders {
+    static NSDictionary *cachedHeaders = nil;
+    static NSDate *cachedAt = nil;
+    @synchronized (self) {
+        if (cachedHeaders && cachedAt && -[cachedAt timeIntervalSinceNow] < 5.0) {
+            return cachedHeaders;
+        }
+    }
+    NSURL *url = [NSURL URLWithString:@"https://ani.jkcoxson.com/"];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.timeoutInterval = 8.0;
+    __block NSData *respData = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        if (d && !e) { respData = d; }
+        dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 9 * NSEC_PER_SEC));
+    if (!respData) {
+        NSLog(@"[DIAG] remote anisette: no response, fallback to local");
+        return nil;
+    }
+    id json = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+    if (![json isKindOfClass:[NSDictionary class]] || [json objectForKey:@"X-Apple-I-MD"] == nil) {
+        NSLog(@"[DIAG] remote anisette: invalid payload, fallback to local");
+        return nil;
+    }
+    NSString *remoteClientInfo = [json objectForKey:@"X-MMe-Client-Info"];
+    if ([remoteClientInfo isKindOfClass:[NSString class]] && remoteClientInfo.length > 0) {
+        self.clientInfoOverride = remoteClientInfo;
+    }
+    NSLog(@"[DIAG] remote anisette OK rininfo=%@ mdlu=%@ client=%@", [json objectForKey:@"X-Apple-I-MD-RINFO"], [json objectForKey:@"X-Apple-I-MD-LU"] ? @"yes" : @"no", remoteClientInfo);
+    @synchronized (self) { cachedHeaders = json; cachedAt = [NSDate date]; }
+    return json;
+}
+
 - (NSDictionary *)_anisetteData {
+    NSDictionary *remoteHeaders = [self _remoteAnisetteHeaders];
+    if (remoteHeaders.count > 0) {
+        return remoteHeaders;
+    }
     NSDateFormatter *formatter = [NSDateFormatter new];
     formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     formatter.calendar = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian];
@@ -375,6 +415,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 }
 
 - (NSDictionary *)_deviceData {
+    if ([self _remoteAnisetteHeaders].count > 0) {
+        // Remote anisette already carries its own device id / serial; do not override.
+        return [NSDictionary dictionary];
+    }
     // Note: X-Apple-I-PRK is also sent, however it's a password reset key which (I think) may not always
     // be present even in genuine requests. It requires another account on device. So let's not include
     // it for now.
@@ -438,6 +482,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     }];
     
     NSURLSessionTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+        NSString *diagAction = request.URL.lastPathComponent ?: @"?";
         
         if (error) {
             completionHandler(error, nil);
@@ -449,9 +496,27 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                                                                                 format:nil
                                                                                  error:nil];
             NSDictionary *packedResponse = [response objectForKey:@"Response"];
+            NSLog(@"[DIAG] GSA %@ HTTP=%ld bytes=%lu parsed=%@", diagAction, httpCode, (unsigned long)data.length, packedResponse ? @"YES" : @"NO");
+            if ([packedResponse isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *st = [packedResponse objectForKey:@"Status"];
+                if ([st isKindOfClass:[NSDictionary class]]) {
+                    NSLog(@"[DIAG]   Status ec=%@ em=%@ au=%@ hsc=%@", [st objectForKey:@"ec"], [st objectForKey:@"em"], [st objectForKey:@"au"], [st objectForKey:@"hsc"]);
+                }
+                NSLog(@"[DIAG]   keys=%@", [[[packedResponse allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]);
+            } else if (data.length > 0) {
+                NSString *rawBody = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (!rawBody) rawBody = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+                if (rawBody.length > 800) rawBody = [rawBody substringToIndex:800];
+                NSLog(@"[DIAG]   raw=%@", rawBody);
+            }
             
             log_debug("Response: %s", packedResponse.description.UTF8String);
             
+            if (!packedResponse && (httpCode < 200 || httpCode >= 300)) {
+                NSString *msg = [NSString stringWithFormat:@"Apple server returned HTTP %ld for %@", httpCode, diagAction];
+                completionHandler([self createError:msg :(int)httpCode], nil);
+                return;
+            }
             completionHandler(nil, packedResponse);
         }
         
@@ -521,6 +586,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 #pragma mark API
 
 - (void)loginWithUsername:(NSString*)username password:(NSString*)password completion:(RPVLoginResultBlock)completionHandler {
+    if (username.length == 0 || password.length == 0) {
+        NSLog(@"[DIAG] loginWithUsername: missing credentials userLen=%lu pwdLen=%lu", (unsigned long)username.length, (unsigned long)password.length);
+        completionHandler([self createError:@"Missing username or password" :RPVInternalLoginError], nil, nil, nil);
+        return;
+    }
     
     // Ensure lookup URLs are populated first
     [self initialiseLookup:^(NSError *error) {

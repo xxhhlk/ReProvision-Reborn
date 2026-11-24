@@ -99,6 +99,19 @@ NSString *const REProtocolVersion = @"QH65B2";
         } else {
             NSData *unpacked = [data isGzippedData] ? [data gunzippedData] : data;
             NSDictionary *plist = [method isEqualToString:@"POST"] ? [NSPropertyListSerialization propertyListWithData:unpacked options:NSPropertyListImmutable format:nil error:nil] : [NSJSONSerialization JSONObjectWithData:unpacked options:0 error:nil];
+            NSHTTPURLResponse *httpResp2 = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            long httpCode2 = httpResp2 ? (long)httpResp2.statusCode : -1;
+            NSString *diagAction2 = request.URL.lastPathComponent ?: @"?";
+            NSLog(@"[DIAG] DEV %@ HTTP=%ld bytes=%lu parsed=%@", diagAction2, httpCode2, (unsigned long)unpacked.length, plist ? @"YES" : @"NO");
+            if ([plist isKindOfClass:[NSDictionary class]]) {
+                NSLog(@"[DIAG]   keys=%@", [[[plist allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]);
+                NSLog(@"[DIAG]   userString=%@ reason=%@ resultCode=%@", [plist objectForKey:@"userString"], [plist objectForKey:@"reason"], [plist objectForKey:@"resultCode"]);
+            } else if (unpacked.length > 0) {
+                NSString *rawBody2 = [[NSString alloc] initWithData:unpacked encoding:NSUTF8StringEncoding];
+                if (!rawBody2) rawBody2 = [[NSString alloc] initWithData:unpacked encoding:NSISOLatin1StringEncoding];
+                if (rawBody2.length > 800) rawBody2 = [rawBody2 substringToIndex:800];
+                NSLog(@"[DIAG]   raw=%@", rawBody2);
+            }
             ;
 
             if (!plist)
@@ -249,6 +262,13 @@ NSString *const REProtocolVersion = @"QH65B2";
             return;
         }
 
+        if (userIdentity.length == 0 || gsToken.length == 0) {
+            NSMutableDictionary *failDict = [NSMutableDictionary dictionary];
+            [failDict setObject:@"Apple did not return a usable token for this account. Please sign in again." forKey:@"userString"];
+            [failDict setObject:@"err" forKey:@"reason"];
+            completionHandler(nil, failDict, nil);
+            return;
+        }
         self.credentials = [[NSURLCredential alloc] initWithUser:userIdentity password:gsToken persistence:NSURLCredentialPersistencePermanent];
 
         // RPVAccountChecker owns team discovery and its retry policy. Running a
