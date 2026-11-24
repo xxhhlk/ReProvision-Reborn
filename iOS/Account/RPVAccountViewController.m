@@ -40,6 +40,14 @@
         self.titleLabel.textColor = [UIColor blackColor];
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
+
+    // Allow the user to skip sign-in and reach the main UI (e.g. to configure
+    // settings). Sign-in can still be triggered later from Settings.
+    UIBarButtonItem *skipButton = [[UIBarButtonItem alloc] initWithTitle:@"Skip"
+                                                                  style:UIBarButtonItemStylePlain
+                                                                 target:self
+                                                                 action:@selector(didTapSkipButton:)];
+    [self.navigationItem setLeftBarButtonItem:skipButton animated:NO];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -148,6 +156,10 @@
     } else {
         self.confirmButtonItem.enabled = NO;
     }
+}
+
+- (void)didTapSkipButton:(id)sender {
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 ////////////////////////////////////////////////////////
