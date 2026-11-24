@@ -98,6 +98,16 @@
 
     [array addObject:threshold];
 
+    PSSpecifier *anisetteGroup = [PSSpecifier groupSpecifierWithName:@"Anisette Server"];
+    [anisetteGroup setProperty:@"Remote anisette server used for Apple ID sign-in. Leave the default unless you operate your own server." forKey:@"footerText"];
+    [array addObject:anisetteGroup];
+
+    PSSpecifier *anisetteURL = [PSSpecifier preferenceSpecifierNamed:@"Anisette Server URL" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];
+    [anisetteURL setProperty:@"anisetteServerURL" forKey:@"key"];
+    [anisetteURL setProperty:@"https://ani.jkcoxson.com" forKey:@"default"];
+    [anisetteURL setProperty:@"https://ani.jkcoxson.com" forKey:@"placeholder"];
+    [array addObject:anisetteURL];
+
     return array;
 }
 
@@ -184,6 +194,8 @@
             return [NSNumber numberWithInt:2];
         } else if ([key isEqualToString:@"shouldAutoRevokeIfNeeded"]) {
             return [NSNumber numberWithBool:NO];
+        } else if ([key isEqualToString:@"anisetteServerURL"]) {
+            return @"https://ani.jkcoxson.com";
         }
 
         return nil;
