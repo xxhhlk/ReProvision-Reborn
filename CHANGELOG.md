@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.13 - 2026-11-26
+
+- **Fixed an app that signed fine but never showed up under its developer** in Settings → General → Profiles & Device Management. An App ID is matched by name as well as by identifier, and its identifier cannot be changed once the entry exists, so an entry that had drifted (the team suffix applied twice) kept handing out a profile for an app id nobody has. Such an entry is now deleted and recreated with the identifier the binary is actually signed with.
+- **A stale profile no longer eats one of your three slots.** A free Apple ID allows three provisioning profiles per team on a device, and a re-sign takes a new one. A profile whose app id does not match its app is orphaned: uninstalling the app does not remove it, and it counts against the limit anyway. If signing stops with "there already are 3 signed apps", check `/var/MobileDevice/ProvisioningProfiles/` and remove the orphan.
+
 ## v0.8.12 - 2026-11-26
 
 Apple ID sign-in rewrite. Signing itself was fine; the parts that touch Apple's authentication servers were not, and this release replaces them.
