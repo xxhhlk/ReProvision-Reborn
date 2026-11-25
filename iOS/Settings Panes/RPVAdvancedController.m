@@ -119,16 +119,16 @@
     return array;
 }
 
-// Mac anisette servers verified to answer with a Mac-flavoured anisette.
-// Only these are selectable: Apple rejects anisette from other platforms.
+// Mac anisette servers, labelled with the ADI provisioning version they report.
+// Apple rejects 0x02050500 with -36607 before it checks the password, so only
+// the 0x04050500 ones can actually sign in.
 - (NSDictionary *)anisetteServerOptions {
     if (_anisetteServerOptions == nil) {
         _anisetteServerOptions = @{
-            @"https://ani.jkcoxson.com":      @"Jkcoxson",
-            @"https://mac-ani.jkcoxson.com":  @"Jkcoxson (Mac)",
-            @"https://ani3.stikstore.app":    @"Stikstore",
-            @"https://new.ani.sidestore.io":  @"SideStore (New)",
-            @"https://ani.iloader.app":       @"iloader",
+            @"https://new.ani.sidestore.io":  @"SideStore (works)",
+            @"https://ani.jkcoxson.com":      @"Jkcoxson (too old)",
+            @"https://mac-ani.jkcoxson.com":  @"Jkcoxson Mac (too old)",
+            @"https://ani3.stikstore.app":    @"Stikstore (too old)",
         };
     }
     return _anisetteServerOptions;

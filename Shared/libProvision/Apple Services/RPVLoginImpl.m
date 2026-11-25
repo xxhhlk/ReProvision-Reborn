@@ -450,10 +450,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         }
     }
     NSString *storedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
-    // new.ani.sidestore.io hands out a different X-Mme-Device-Id on every call,
-    // which makes Developer Services reject the token with 1100 later on, so the
-    // default is a server with a stable identity.
-    NSString *urlString = (storedURL && storedURL.length > 0) ? storedURL : @"https://ani.jkcoxson.com";
+    // Must be a provisioner whose X-Apple-I-MD-RINFO is 0x04050500 or newer;
+    // Apple rejects older ADI provisioning with -36607 before it even checks the
+    // password. The older jkcoxson/stikstore servers report 0x02050500.
+    NSString *urlString = (storedURL && storedURL.length > 0) ? storedURL : @"https://new.ani.sidestore.io";
     NSURL *url = [NSURL URLWithString:urlString];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = 8.0;

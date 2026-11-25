@@ -264,10 +264,11 @@ NSString *const REProtocolVersion = @"QH65B2";
                 [resultDictionary setObject:@"Your Apple ID or password is incorrect. App-specific passwords are not supported." forKey:@"userString"];
                 [resultDictionary setObject:@"incorrectCredentials" forKey:@"reason"];
             } else if (error.code == -36607) {
-                // Account-level throttling. Retrying makes the cooldown longer,
-                // so say what it is instead of "incorrect credentials".
-                [resultDictionary setObject:@"Apple is temporarily blocking sign-in for this account. Wait a few hours, then try again. Do not retry repeatedly — each attempt extends the block." forKey:@"userString"];
-                [resultDictionary setObject:@"rateLimited" forKey:@"reason"];
+                // Apple rejects an anisette provisioned with an old ADI version
+                // before it even checks the password, so this is a server
+                // problem, not a throttled account.
+                [resultDictionary setObject:@"This anisette server is out of date, so Apple refuses the sign-in. Pick a newer server in Settings, Advanced." forKey:@"userString"];
+                [resultDictionary setObject:@"anisetteTooOld" forKey:@"reason"];
             } else if (error.code == 5000) {  // Internal error
                 [resultDictionary setObject:error.localizedDescription forKey:@"userString"];
                 [resultDictionary setObject:@"incorrectCredentials" forKey:@"reason"];
