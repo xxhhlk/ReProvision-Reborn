@@ -1538,7 +1538,6 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         completionHandler([self createError:[NSString stringWithFormat:@"Apple could not verify that code (HTTP %ld).", httpCode]
                                            :RPVInternalLoginError]);
     }];
-    [task resume];
 }
 
 @end
