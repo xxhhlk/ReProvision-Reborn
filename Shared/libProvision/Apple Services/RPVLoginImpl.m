@@ -1196,7 +1196,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             // actual structure is visible when a real number list is expected.
             if ([object isKindOfClass:[NSDictionary class]]) {
                 NSLog(@"[DIAG] /auth no number, keys=%@", [[object allKeys] sortedArrayUsingSelector:@selector(compare:)]);
-            } else if ([object isKindOfClass:[NSArray class]] && object.count > 0) {
+            } else if ([object isKindOfClass:[NSArray class]] && ((NSArray *)object).count > 0) {
                 NSLog(@"[DIAG] /auth no number, first=%@", [object[0] description]);
             }
             completionHandler([self createError:@"This Apple ID has no trusted phone number that can receive a code." :RPVInternalLoginError], nil);
