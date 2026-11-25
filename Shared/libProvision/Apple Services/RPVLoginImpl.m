@@ -415,7 +415,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     static NSDictionary *cachedHeaders = nil;
     static NSDate *cachedAt = nil;
     @synchronized (self) {
-        if (cachedHeaders && cachedAt && -[cachedAt timeIntervalSinceNow] < 5.0) {
+        // Cache long enough that /auth, the code send and the code verification
+        // all use the same attestation. A fresh anisette mid-flow makes Apple
+        // reject the verification with HTTP 401.
+        if (cachedHeaders && cachedAt && -[cachedAt timeIntervalSinceNow] < 300.0) {
             return cachedHeaders;
         }
     }
@@ -1213,6 +1216,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] /auth HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"/auth HTTP=%ld bytes=%lu err=%@", httpCode, (unsigned long)data.length, error.localizedDescription ?: @"none"]);
+        {
+            NSString *md = request.allHTTPHeaderFields[@"X-Apple-I-MD"] ?: @"";
+            NSString *mdm = request.allHTTPHeaderFields[@"X-Apple-I-MD-M"] ?: @"";
+            NSString *tok = request.allHTTPHeaderFields[@"X-Apple-Identity-Token"] ?: @"";
+            RPV2FAWriteLog([NSString stringWithFormat:@"/auth anisette MD=%.6s MDM=%.6s tokLen=%lu", md.UTF8String ?: "", mdm.UTF8String ?: "", (unsigned long)tok.length]);
+        }
 
         if (error) {
             completionHandler(error, nil);
@@ -1521,6 +1530,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA code request %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"2FA send %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length]);
+        {
+            NSString *md = request.allHTTPHeaderFields[@"X-Apple-I-MD"] ?: @"";
+            NSString *mdm = request.allHTTPHeaderFields[@"X-Apple-I-MD-M"] ?: @"";
+            NSString *tok = request.allHTTPHeaderFields[@"X-Apple-Identity-Token"] ?: @"";
+            RPV2FAWriteLog([NSString stringWithFormat:@"2FA send anisette MD=%.6s MDM=%.6s tokLen=%lu", md.UTF8String ?: "", mdm.UTF8String ?: "", (unsigned long)tok.length]);
+        }
         if (data.length > 0) {
             NSString *sendBody = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             if (!sendBody) sendBody = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
@@ -1670,6 +1685,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length]);
+        {
+            NSString *md = request.allHTTPHeaderFields[@"X-Apple-I-MD"] ?: @"";
+            NSString *mdm = request.allHTTPHeaderFields[@"X-Apple-I-MD-M"] ?: @"";
+            NSString *tok = request.allHTTPHeaderFields[@"X-Apple-Identity-Token"] ?: @"";
+            RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit anisette MD=%.6s MDM=%.6s tokLen=%lu", md.UTF8String ?: "", mdm.UTF8String ?: "", (unsigned long)tok.length]);
+        }
 
         if (error) {
             RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit transport error=%@", error.localizedDescription ?: @"?"]);
