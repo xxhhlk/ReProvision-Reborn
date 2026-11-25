@@ -1208,7 +1208,19 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
 - (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode deliveryMode:(NSString *)requestedDeliveryMode andCompletion:(void (^)(NSError *error))completionHandler {
 
-    if (mode == RPVInternalLogin2FARequiredTrustedDeviceError) {
+    // Apple reports "trustedDeviceSecondaryAuth" for accounts that can approve a
+    // prompt on another device. That prompt never reaches the user here, so when
+    // a delivery mode is chosen send the code to the trusted phone number
+    // instead, whatever mode Apple reported.
+    BOOL useTrustedPhone = requestedDeliveryMode.length > 0 ||
+        mode == RPVInternalLogin2FARequiredSecondaryAuthError;
+
+    if (!useTrustedPhone) {
+        if (mode != RPVInternalLogin2FARequiredTrustedDeviceError) {
+            completionHandler([self createError:@"Apple returned an unsupported two-factor authentication mode" :RPVInternalLoginError]);
+            return;
+        }
+
         self.twoFactorPhoneNumberID = nil;
         self.twoFactorPhoneDeliveryMode = nil;
         NSURL *URL = self.lookupURLs ?
@@ -1219,11 +1231,6 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                                                          userIdentity:userIdentity
                                                             idmsToken:token];
         [self _performTwoFactorCodeRequest:request completion:completionHandler];
-        return;
-    }
-
-    if (mode != RPVInternalLogin2FARequiredSecondaryAuthError) {
-        completionHandler([self createError:@"Apple returned an unsupported two-factor authentication mode" :RPVInternalLoginError]);
         return;
     }
 
@@ -1310,7 +1317,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
         NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         long httpCode = httpResp ? (long)httpResp.statusCode : -1;
-        NSLog(@"[DIAG] 2FA code request HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+        NSLog(@"[DIAG] 2FA code request %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length);
 
         if (error) {
             completionHandler(error);
