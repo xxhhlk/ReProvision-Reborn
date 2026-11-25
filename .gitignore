@@ -15,3 +15,9 @@ iOS/Package/usr/libexec/reprovisiond
 *xcworkspace/xcuserdata/*
 *xcodeproj/xcuserdata/*
 *xcodeproj/project.xcworkspace/xcuserdata/*
+
+# Local build scratch and pre-edit copies
+.build-backups/
+*.bak
+*.bak-*
+*.orig
