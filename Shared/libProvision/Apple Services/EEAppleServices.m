@@ -11,6 +11,9 @@
 #import "NSData+GZIP.h"
 #import "RPVAuthentication.h"
 #import "RPVLoginImpl.h"
+#if TARGET_OS_IOS
+#import "RPVResources.h"
+#endif
 
 NSString *const REClientID = @"XABBG36SBA";
 NSString *const REProtocolVersion = @"QH65B2";
@@ -112,6 +115,19 @@ NSString *const REProtocolVersion = @"QH65B2";
             if ([plist isKindOfClass:[NSDictionary class]]) {
                 NSLog(@"[DIAG]   keys=%@", [[[plist allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]);
                 NSLog(@"[DIAG]   userString=%@ reason=%@ resultCode=%@", [plist objectForKey:@"userString"], [plist objectForKey:@"reason"], [plist objectForKey:@"resultCode"]);
+
+                // 1100 means the stored token no longer matches the anisette
+                // identity, so every later request would fail the same way.
+                // Drop it and send the user back to the sign-in screen.
+                id code = [plist objectForKey:@"resultCode"];
+                if (code && [code respondsToSelector:@selector(intValue)] && [code intValue] == 1100) {
+                    RPV2FAWriteLog(@"portal rejected the token (1100), clearing saved credentials");
+#if TARGET_OS_IOS
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [RPVResources userDidRequestAccountSignOut];
+                    });
+#endif
+                }
             } else if (unpacked.length > 0) {
                 NSString *rawBody2 = [[NSString alloc] initWithData:unpacked encoding:NSUTF8StringEncoding];
                 if (!rawBody2) rawBody2 = [[NSString alloc] initWithData:unpacked encoding:NSISOLatin1StringEncoding];
@@ -247,6 +263,11 @@ NSString *const REProtocolVersion = @"QH65B2";
             if (error.code == -22406) {
                 [resultDictionary setObject:@"Your Apple ID or password is incorrect. App-specific passwords are not supported." forKey:@"userString"];
                 [resultDictionary setObject:@"incorrectCredentials" forKey:@"reason"];
+            } else if (error.code == -36607) {
+                // Account-level throttling. Retrying makes the cooldown longer,
+                // so say what it is instead of "incorrect credentials".
+                [resultDictionary setObject:@"Apple is temporarily blocking sign-in for this account. Wait a few hours, then try again. Do not retry repeatedly — each attempt extends the block." forKey:@"userString"];
+                [resultDictionary setObject:@"rateLimited" forKey:@"reason"];
             } else if (error.code == 5000) {  // Internal error
                 [resultDictionary setObject:error.localizedDescription forKey:@"userString"];
                 [resultDictionary setObject:@"incorrectCredentials" forKey:@"reason"];
