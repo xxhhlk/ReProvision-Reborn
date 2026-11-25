@@ -31,16 +31,17 @@ static NSString * const RPVGrandSlamClientInfo = @"<MacBookPro11,5> <Mac OS X;10
 static NSString * const RPVGrandSlamUserAgent = @"AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
 static NSString * const RPVGrandSlamXcodeVersion = @"14.2 (14C18)";
 
-// Anisette shared by every request. The attestation Apple accepts for one
-// session must stay identical, so the fetched headers are pinned here: GSA
-// refreshes them on its own 5 minute cycle, Developer Services keeps using the
-// copy the token was minted with.
+// Anisette shared by every request in the current run. A server with a stable
+// identity returns the same X-Mme-Device-Id every time and rotates only the
+// one-shot X-Apple-I-MD, so Developer Services can be handed a fresh copy on a
+// later launch and still accept the persisted token.
 static NSDictionary *RPVAnisetteHeaders = nil;
 static NSDate *RPVAnisetteFetchedAt = nil;
 
-// Snapshot of the headers that minted the current token. Developer Services
-// keeps using this one even after GSA rotates its cache.
-static NSDictionary *RPVPortalAnisetteHeaders = nil;
+// Device identity that minted the current token. Kept only to verify that the
+// anisette server still reports the same machine; the headers themselves are
+// never reused because the attestation is a one-shot value.
+static NSString *RPVTokenMintingDeviceId = nil;
 
 struct ccrng_state *ccDRBGGetRngState(void);
 
@@ -483,17 +484,24 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 }
 
 // The anisette identity currently in use. Developer Services rejects a token
-// presented with a different identity than the one that minted it.
+// Anisette for Developer Services. Always fetched fresh so the attestation is
+// current, and checked against the identity that minted the token: a server
+// that hands out a new device id on every call would make Apple answer 1100.
 - (NSDictionary *)currentAnisetteHeaders {
-    // Developer Services must present the identity that minted the token. The
-    // attestation itself is a one-shot OTP, so this can only be the copy from
-    // the current run; a relaunch has to log in again, which re-mints both.
-    @synchronized (self) {
-        if (RPVPortalAnisetteHeaders.count > 0) {
-            return RPVPortalAnisetteHeaders;
-        }
+    NSDictionary *headers = [self _anisetteData];
+    NSString *deviceId = headers[@"X-Mme-Device-Id"];
+    NSString *mintedBy = nil;
+    @synchronized (self) { mintedBy = RPVTokenMintingDeviceId; }
+    if (mintedBy.length == 0) {
+        mintedBy = [[NSUserDefaults standardUserDefaults] objectForKey:@"RPVTokenMintingDeviceId"];
+        @synchronized (self) { RPVTokenMintingDeviceId = mintedBy; }
     }
-    return [self _anisetteData];
+
+    if (mintedBy.length > 0 && deviceId.length > 0 && ![deviceId isEqualToString:mintedBy]) {
+        RPV2FAWriteLog([NSString stringWithFormat:@"anisette identity changed %@ -> %@, token is stale",
+                        mintedBy, deviceId]);
+    }
+    return headers;
 }
 
 - (NSDictionary *)_anisetteData {
@@ -1281,8 +1289,15 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSString *token = decryptedTokDict[@"t"][app][@"token"];
     RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ok tokenLen=%lu", (unsigned long)token.length]);
     if (token.length > 0) {
-        // Freeze the identity that minted this token for Developer Services.
-        @synchronized (self) { RPVPortalAnisetteHeaders = RPVAnisetteHeaders; }
+        // Remember which machine minted this token so a later launch can tell
+        // whether the anisette server still reports the same identity.
+        NSString *deviceId = RPVAnisetteHeaders[@"X-Mme-Device-Id"];
+        if (deviceId.length > 0) {
+            @synchronized (self) { RPVTokenMintingDeviceId = deviceId; }
+            [[NSUserDefaults standardUserDefaults] setObject:deviceId
+                                                      forKey:@"RPVTokenMintingDeviceId"];
+            RPV2FAWriteLog([NSString stringWithFormat:@"token minted by device=%@", deviceId]);
+        }
     }
     completionHandler(nil, token);
 }
