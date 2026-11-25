@@ -42,6 +42,11 @@ static NSDate *RPVAnisetteFetchedAt = nil;
 // keeps using this one even after GSA rotates its cache.
 static NSDictionary *RPVPortalAnisetteHeaders = nil;
 
+// The token outlives the process, so the identity that minted it has to be
+// persisted too; otherwise the next launch presents a fresh anisette and the
+// portal answers resultCode 1100 ("Your session has expired").
+static NSString * const RPVPortalAnisetteDefaultsKey = @"RPVPortalAnisetteSnapshot";
+
 struct ccrng_state *ccDRBGGetRngState(void);
 
 // On this device syslog is not running and there is no `log` tool, so NSLog
@@ -491,6 +496,15 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             return RPVAnisetteHeaders;
         }
     }
+
+    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:RPVPortalAnisetteDefaultsKey];
+    if ([stored isKindOfClass:[NSDictionary class]] && [stored count] > 0) {
+        RPV2FAWriteLog(@"anisette restored from disk for Developer Services");
+        @synchronized (self) { RPVPortalAnisetteHeaders = stored; }
+        return stored;
+    }
+
+    RPV2FAWriteLog(@"anisette fetched fresh for Developer Services (no snapshot)");
     return [self _anisetteData];
 }
 
@@ -1279,8 +1293,14 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSString *token = decryptedTokDict[@"t"][app][@"token"];
     RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ok tokenLen=%lu", (unsigned long)token.length]);
     if (token.length > 0) {
-        // Freeze the identity that minted this token for Developer Services.
+        // Freeze the identity that minted this token for Developer Services,
+        // both in memory and on disk so a relaunch keeps presenting it.
         @synchronized (self) { RPVPortalAnisetteHeaders = RPVAnisetteHeaders; }
+        if (RPVAnisetteHeaders.count > 0) {
+            [[NSUserDefaults standardUserDefaults] setObject:RPVAnisetteHeaders
+                                                      forKey:RPVPortalAnisetteDefaultsKey];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+        }
     }
     completionHandler(nil, token);
 }
