@@ -23,6 +23,14 @@
 
 #define DEBUG 1
 
+// GrandSlam's developer sign-in only accepts a Mac client. Claiming an iPhone
+// makes the apptokens step answer -80046 ("This action cannot be completed at
+// this time"), which is a platform check rather than a credential problem.
+// The anisette still comes from the device; only the claimed client changes.
+static NSString * const RPVGrandSlamClientInfo = @"<MacBookPro11,5> <Mac OS X;10.14.6;18G103> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+static NSString * const RPVGrandSlamUserAgent = @"AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
+static NSString * const RPVGrandSlamXcodeVersion = @"14.2 (14C18)";
+
 struct ccrng_state *ccDRBGGetRngState(void);
 
 @interface AKAppleIDSession : NSObject
@@ -295,7 +303,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     self = [super init];
     
     if (self) {
-        self.clientInfoOverride = @"<iPhone12,8> <iPhone OS;13.4.1;17E8258> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+        self.clientInfoOverride = RPVGrandSlamClientInfo;
         
 #if TARGET_OS_IOS
         // Create rng pointer
@@ -466,7 +474,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     return @{
         @"X-MMe-Client-Info": self.clientInfoOverride,
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"*/*"
     };
 }
@@ -626,11 +634,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // Sort out headers
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
-        @"X-Xcode-Version": @"11.2 (11B41)",
+        @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
     } mutableCopy];
     
     [httpHeaders addEntriesFromDictionary:[self _anisetteData]];
@@ -1068,12 +1076,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // Sort out headers
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-Client-App-Name": @"Xcode",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
-        @"X-Xcode-Version": @"11.2 (11B41)",
+        @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
         @"X-Apple-Identity-Token": encodedIdentityToken,
     } mutableCopy];
     
@@ -1138,12 +1146,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // Sort out headers
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
         @"X-Apple-Client-App-Name": @"Xcode",
-        @"X-Xcode-Version": @"11.2 (11B41)",
+        @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
         @"X-Apple-Identity-Token": encodedIdentityToken,
     } mutableCopy];
     
@@ -1234,12 +1242,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
         @"security-code": normalizedCode,
         @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": @"akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+        @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"text/x-xml-plist",
         @"Accept-Language": @"en-us",
         @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
         @"X-Apple-Client-App-Name": @"Xcode",
-        @"X-Xcode-Version": @"11.2 (11B41)",
+        @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
         @"X-Apple-Identity-Token": encodedIdentityToken,
     } mutableCopy];
     
