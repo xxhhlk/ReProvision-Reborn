@@ -7,6 +7,7 @@
 //
 
 #import "RPVLoginImpl.h"
+#import "RPVRemoteAnisetteProvider.h"
 
 #import <corecrypto/ccsrp.h>
 #import <corecrypto/ccdrbg.h>
@@ -329,6 +330,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
 @property (nonatomic, strong) NSDictionary *lookupURLs;
 
+// Keeps one adi_pb-backed identity for the whole app session.
+@property (nonatomic, strong) RPVRemoteAnisetteProvider *anisetteProvider;
+
 // Trusted phone number the current 2FA code was sent to, and how.
 @property (nonatomic, strong) NSString *twoFactorPhoneNumberID;
 @property (nonatomic, strong) NSString *twoFactorPhoneDeliveryMode;
@@ -439,51 +443,55 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // The device's own AuthKit anisette is unusable here: AKD cannot reach its
     // ADI keys on this jailbreak, so every request comes back with the same
     // X-Apple-I-MD-M value. Apple rejects that as an invalid attestation
-    // (-22410 / -80046), so prefer a remote Mac anisette and only fall back to
-    // the device when the server is unreachable.
+    // (-22410 / -80046).
+    //
+    // A plain `GET /` anisette endpoint is not enough either: it hands out a
+    // throwaway emulated Mac, so the identity changes on every fetch and the
+    // saved GS token stops matching (resultCode 1100 on the next launch), while
+    // the older endpoints report ADI routing info Apple now rejects with
+    // -36607. The v3 provider provisions an adi_pb once and reuses it, which
+    // keeps the identity fixed while the one-shot OTP stays fresh.
     @synchronized (self) {
-        // Cache long enough that /auth, the code send and the code verification
-        // all use the same attestation. A fresh anisette mid-flow makes Apple
+        // Cache briefly so /auth, the code send and the code verification all
+        // use the same attestation. A fresh anisette mid-flow makes Apple
         // reject the verification with HTTP 401.
-        if (RPVAnisetteHeaders && RPVAnisetteFetchedAt && -[RPVAnisetteFetchedAt timeIntervalSinceNow] < 300.0) {
+        if (RPVAnisetteHeaders && RPVAnisetteFetchedAt && -[RPVAnisetteFetchedAt timeIntervalSinceNow] < 60.0) {
             return RPVAnisetteHeaders;
         }
     }
-    NSString *storedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
-    // Must be a provisioner whose X-Apple-I-MD-RINFO is 0x04050500 or newer;
-    // Apple rejects older ADI provisioning with -36607 before it even checks the
-    // password. The older jkcoxson/stikstore servers report 0x02050500.
-    NSString *urlString = (storedURL && storedURL.length > 0) ? storedURL : @"https://new.ani.sidestore.io";
-    NSURL *url = [NSURL URLWithString:urlString];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.timeoutInterval = 8.0;
-    __block NSData *respData = nil;
+
+    if (!self.anisetteProvider) {
+        self.anisetteProvider = [[RPVRemoteAnisetteProvider alloc] init];
+    }
+
+    __block NSDictionary *headers = nil;
+    __block NSError *providerError = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (d && !e) { respData = d; }
+    [self.anisetteProvider fetchAnisetteDataWithCompletion:^(NSDictionary<NSString *,NSString *> *result, NSError *error) {
+        headers = result;
+        providerError = error;
         dispatch_semaphore_signal(sem);
-    }] resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 9 * NSEC_PER_SEC));
-    if (!respData) {
-        NSLog(@"[DIAG] remote anisette: no response, fallback to local");
+    }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC));
+
+    if (headers.count == 0) {
+        NSLog(@"[DIAG] remote anisette failed: %@, fallback to local", providerError.localizedDescription ?: @"timeout");
+        RPV2FAWriteLog([NSString stringWithFormat:@"anisette v3 failed: %@", providerError.localizedDescription ?: @"timeout"]);
         return nil;
     }
-    id json = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
-    if (![json isKindOfClass:[NSDictionary class]] || [json objectForKey:@"X-Apple-I-MD"] == nil) {
-        NSLog(@"[DIAG] remote anisette: invalid payload, fallback to local");
-        return nil;
+
+    NSString *clientInfo = headers[@"X-MMe-Client-Info"];
+    if ([clientInfo isKindOfClass:[NSString class]] && clientInfo.length > 0) {
+        self.clientInfoOverride = clientInfo;
     }
-    NSString *remoteClientInfo = [json objectForKey:@"X-MMe-Client-Info"];
-    if ([remoteClientInfo isKindOfClass:[NSString class]] && remoteClientInfo.length > 0) {
-        self.clientInfoOverride = remoteClientInfo;
-    }
-    NSLog(@"[DIAG] remote anisette OK rininfo=%@ mdlu=%@ client=%@", [json objectForKey:@"X-Apple-I-MD-RINFO"], [json objectForKey:@"X-Apple-I-MD-LU"] ? @"yes" : @"no", remoteClientInfo);
-    RPV2FAWriteLog([NSString stringWithFormat:@"anisette fetched server=%@ device=%@", urlString, [json objectForKey:@"X-Mme-Device-Id"] ?: @"-"]);
-    @synchronized (self) { RPVAnisetteHeaders = json; RPVAnisetteFetchedAt = [NSDate date]; }
-    return json;
+    RPV2FAWriteLog([NSString stringWithFormat:@"anisette v3 ok device=%@ rinfo=%@ mdlu=%@",
+                    headers[@"X-Mme-Device-Id"] ?: @"-",
+                    headers[@"X-Apple-I-MD-RINFO"] ?: @"-",
+                    headers[@"X-Apple-I-MD-LU"] ?: @"-"]);
+    @synchronized (self) { RPVAnisetteHeaders = headers; RPVAnisetteFetchedAt = [NSDate date]; }
+    return headers;
 }
 
-// The anisette identity currently in use. Developer Services rejects a token
 // Anisette for Developer Services. Always fetched fresh so the attestation is
 // current, and checked against the identity that minted the token: a server
 // that hands out a new device id on every call would make Apple answer 1100.
@@ -892,12 +900,22 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         completionHandler([self createError:@"Missing username or password" :RPVInternalLoginError], nil, nil, nil);
         return;
     }
+
+    // A fresh manual sign-in may legitimately provision a new ADI identity, but
+    // once GrandSlam starts the identity has to stay put or a valid session
+    // looks expired. Unpin here, re-pin as soon as the login begins.
+    if (!self.anisetteProvider) {
+        self.anisetteProvider = [[RPVRemoteAnisetteProvider alloc] init];
+    }
+    self.anisetteProvider.identityPinned = NO;
+    @synchronized (self) { RPVAnisetteHeaders = nil; RPVAnisetteFetchedAt = nil; }
     
     // Ensure lookup URLs are populated first
     [self initialiseLookup:^(NSError *error) {
         if (error) {
             completionHandler(error, nil, nil, nil);
         } else {
+            self.anisetteProvider.identityPinned = YES;
     
             NSMutableDictionary *clientData = @{
                 @"bootstrap": @YES,

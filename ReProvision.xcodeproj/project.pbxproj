@@ -137,6 +137,7 @@
 		C974029523B6381D00BA9B25 /* doc_22.png in Resources */ = {isa = PBXBuildFile; fileRef = C974029123B6381D00BA9B25 /* doc_22.png */; };
 		C974029623B6381D00BA9B25 /* doc_44.png in Resources */ = {isa = PBXBuildFile; fileRef = C974029223B6381D00BA9B25 /* doc_44.png */; };
 		C97C5F5D238B20FB0042638C /* RPVLoginImpl.m in Sources */ = {isa = PBXBuildFile; fileRef = C97C5F5B238B20FB0042638C /* RPVLoginImpl.m */; };
+		A1B2C3D4E5F6000000000001 /* RPVRemoteAnisetteProvider.m in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6000000000002 /* RPVRemoteAnisetteProvider.m */; };
 		C97EF5BA20F6AA3B005CB1DB /* RMessageDesign.json in Resources */ = {isa = PBXBuildFile; fileRef = C97EF5B920F6AA3B005CB1DB /* RMessageDesign.json */; };
 		C985A50C23A582F200A443A9 /* RPVLoginFallbackImpl.m in Sources */ = {isa = PBXBuildFile; fileRef = C985A50B23A582F200A443A9 /* RPVLoginFallbackImpl.m */; };
 		C996746620EE314B00EEFBD2 /* PackageVersion.plist in Resources */ = {isa = PBXBuildFile; fileRef = C996746520EE314B00EEFBD2 /* PackageVersion.plist */; };
@@ -450,6 +451,7 @@
 		C974029123B6381D00BA9B25 /* doc_22.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = doc_22.png; path = "Icons/iOS Sharing/doc_22.png"; sourceTree = SOURCE_ROOT; };
 		C974029223B6381D00BA9B25 /* doc_44.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = doc_44.png; path = "Icons/iOS Sharing/doc_44.png"; sourceTree = SOURCE_ROOT; };
 		C97C5F5B238B20FB0042638C /* RPVLoginImpl.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVLoginImpl.m; sourceTree = "<group>"; };
+		A1B2C3D4E5F6000000000002 /* RPVRemoteAnisetteProvider.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVRemoteAnisetteProvider.m; sourceTree = "<group>"; };
 		C97C5F5C238B20FB0042638C /* RPVLoginImpl.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVLoginImpl.h; sourceTree = "<group>"; };
 		C97EF5B920F6AA3B005CB1DB /* RMessageDesign.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = RMessageDesign.json; sourceTree = "<group>"; };
 		C985A50A23A582F200A443A9 /* RPVLoginFallbackImpl.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVLoginFallbackImpl.h; sourceTree = "<group>"; };
@@ -1206,6 +1208,7 @@
 				C9C6EA7A2004280A00211FDD /* NSData+GZIP.m */,
 				C97C5F5C238B20FB0042638C /* RPVLoginImpl.h */,
 				C97C5F5B238B20FB0042638C /* RPVLoginImpl.m */,
+				A1B2C3D4E5F6000000000002 /* RPVRemoteAnisetteProvider.m */,
 				C985A50A23A582F200A443A9 /* RPVLoginFallbackImpl.h */,
 				C985A50B23A582F200A443A9 /* RPVLoginFallbackImpl.m */,
 			);
@@ -2228,6 +2231,7 @@
 				C96FBFE820EB9F0F007E2EC3 /* RPVInstalledMainHeaderView.m in Sources */,
 				C9C90B1E20FCA7F1001258C3 /* RPVCalendarController.m in Sources */,
 				C97C5F5D238B20FB0042638C /* RPVLoginImpl.m in Sources */,
+				A1B2C3D4E5F6000000000001 /* RPVRemoteAnisetteProvider.m in Sources */,
 				C9C6EB282004280A00211FDD /* crypt.c in Sources */,
 				C985A50C23A582F200A443A9 /* RPVLoginFallbackImpl.m in Sources */,
 				C9C6EB082004280A00211FDD /* hashtable.c in Sources */,
