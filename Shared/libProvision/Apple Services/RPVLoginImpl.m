@@ -328,7 +328,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (BOOL)_isRetryableGSAStatus:(long)httpCode;
 - (BOOL)_isRetryableNSURLError:(NSError *)error;
 - (NSURLSession *)_gsaEphemeralSession;
+- (NSURLSession *)_twoFactorSession;
 - (void)_performGSADataRequest:(NSMutableURLRequest *)request attempt:(NSUInteger)attempt completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler;
+- (void)_performGSADataRequest:(NSMutableURLRequest *)request attempt:(NSUInteger)attempt session:(NSURLSession *)providedSession completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler;
 - (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (NSDictionary *)_phoneDescriptorFromAuthResponse:(id)response;
@@ -571,6 +573,26 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     return [NSURLSession sessionWithConfiguration:config];
 }
 
+// One long-lived session for the trusted-phone exchange (/auth, send, verify).
+// Apple ties the code request and the code verification together with a session
+// cookie; issuing them on separate throwaway sessions makes a correct code come
+// back as HTTP 401. 5xx/edge drops are still handled by the retry in
+// _performGSADataRequest.
+- (NSURLSession *)_twoFactorSession {
+    static NSURLSession *session = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+        config.URLCache = nil;
+        config.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+        config.timeoutIntervalForRequest = 30.0;
+        config.timeoutIntervalForResource = 60.0;
+        config.HTTPShouldUsePipelining = NO;
+        session = [NSURLSession sessionWithConfiguration:config];
+    });
+    return session;
+}
+
 // Runs a single GSA request on a throwaway socket and retries transient
 // failures (network errors and 5xx). The edge drops a keep-alive connection
 // after a couple of uses and answers the next request with an HTML 503, so
@@ -578,16 +600,29 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (void)_performGSADataRequest:(NSMutableURLRequest *)request
                        attempt:(NSUInteger)attempt
                     completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler {
+    [self _performGSADataRequest:request attempt:attempt session:nil completion:completionHandler];
+}
+
+// Same, but on a caller-provided session. A shared session keeps cookies and
+// cookies are what tie the 2FA "send code" and "verify code" requests together;
+// such a session is owned by the caller and is not invalidated here.
+- (void)_performGSADataRequest:(NSMutableURLRequest *)request
+                       attempt:(NSUInteger)attempt
+                       session:(NSURLSession *)providedSession
+                    completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler {
     if (!request || !request.URL) {
         completionHandler([self createError:@"The Apple request could not be created" :RPVInternalLoginError], nil, -1);
         return;
     }
 
     NSString *diagPath = request.URL.path ?: @"?";
-    NSURLSession *session = [self _gsaEphemeralSession];
+    BOOL ownsSession = (providedSession == nil);
+    NSURLSession *session = providedSession ?: [self _gsaEphemeralSession];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        [session finishTasksAndInvalidate];
+        if (ownsSession) {
+            [session finishTasksAndInvalidate];
+        }
 
         NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         long httpCode = httpResp ? (long)httpResp.statusCode : -1;
@@ -596,7 +631,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             NSTimeInterval delay = attempt == 0 ? 1.5 : (attempt == 1 ? 3.0 : 6.0);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                [self _performGSADataRequest:request attempt:attempt + 1 completion:completionHandler];
+                [self _performGSADataRequest:request attempt:attempt + 1 session:providedSession completion:completionHandler];
             });
         };
 
@@ -1175,7 +1210,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     log_debug("Request to: %s", URL.description.UTF8String);
 
-    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
+    [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] /auth HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"/auth HTTP=%ld bytes=%lu err=%@", httpCode, (unsigned long)data.length, error.localizedDescription ?: @"none"]);
 
@@ -1483,9 +1518,15 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     log_debug("Request to: %s", request.URL.description.UTF8String);
 
-    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
+    [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA code request %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"2FA send %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length]);
+        if (data.length > 0) {
+            NSString *sendBody = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!sendBody) sendBody = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            if (sendBody.length > 1200) sendBody = [sendBody substringToIndex:1200];
+            RPV2FAWriteLog([NSString stringWithFormat:@"2FA send body=%@", sendBody ?: @"(non-text)"]);
+        }
 
         if (error) {
             completionHandler(error);
@@ -1626,7 +1667,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSLog(@"[DIAG] 2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode);
     RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode]);
 
-    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
+    [self _performGSADataRequest:request attempt:0 session:[self _twoFactorSession] completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
         RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length]);
 
