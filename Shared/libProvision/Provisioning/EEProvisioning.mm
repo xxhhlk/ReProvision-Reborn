@@ -8,6 +8,7 @@
 
 #import "EEProvisioning.h"
 #import "EESigning.h"
+#import "RPVLoginImpl.h"
 #import "SAMKeychain.h"
 
 #include <openssl/pem.h>
@@ -666,6 +667,15 @@ free_all:
 }
 
 - (void)_addOrUpdateApplicationID:(NSString *)applicationIdentifier applicationName:(NSString *)applicationName binaryLocation:(NSString *)binaryLocation systemType:(EESystemType)systemType withCompletionHandler:(void (^)(NSError *, NSString *, NSDictionary *))completionHandler {
+    [self _addOrUpdateApplicationID:applicationIdentifier
+                    applicationName:applicationName
+                     binaryLocation:binaryLocation
+                         systemType:systemType
+                      allowRecreate:YES
+              withCompletionHandler:completionHandler];
+}
+
+- (void)_addOrUpdateApplicationID:(NSString *)applicationIdentifier applicationName:(NSString *)applicationName binaryLocation:(NSString *)binaryLocation systemType:(EESystemType)systemType allowRecreate:(BOOL)allowRecreate withCompletionHandler:(void (^)(NSError *, NSString *, NSDictionary *))completionHandler {
     [[EEAppleServices sharedInstance] listAllApplicationsForTeamID:[[EEAppleServices sharedInstance] currentTeamID] systemType:systemType withCompletionHandler:^(NSError *error, NSDictionary *plist) {
         if (error) {
             NSError *err = [EEProvisioning _errorFromString:[@"listAllApplicationsForTeamID: " stringByAppendingString:error.localizedDescription]];
@@ -693,6 +703,58 @@ free_all:
                 fullidentifier = [appIdDictionary objectForKey:@"identifier"];
                 break;
             }
+        }
+
+        // Matching by name alone is not enough to reuse an entry. An existing
+        // App ID's identifier cannot be changed afterwards, so a stale entry
+        // whose identifier drifted keeps handing out a profile that does not
+        // cover the binary we are about to sign. iOS then treats that profile as
+        // belonging to some other app and leaves ours out of Settings > General
+        // > Profiles & Device Management, where only apps a profile applies to
+        // are listed. Delete the stale entry and let the add path recreate it.
+        if (allowRecreate && appIdExists && ![fullidentifier isEqualToString:applicationIdentifier]) {
+            NSLog(@"App ID '%@' is '%@' but '%@' is needed, so recreating it", applicationName, fullidentifier, applicationIdentifier);
+            RPV2FAWriteLog([NSString stringWithFormat:@"dev appId stale name=%@ old=%@ new=%@, recreating",
+                            applicationName, fullidentifier, applicationIdentifier]);
+
+            [[EEAppleServices sharedInstance] deleteApplicationIdId:appIdIdIfExists teamID:[[EEAppleServices sharedInstance] currentTeamID] systemType:systemType withCompletionHandler:^(NSError *error, NSDictionary *response) {
+                if (error) {
+                    NSError *err = [EEProvisioning _errorFromString:[@"deleteApplicationIdId: " stringByAppendingString:error.localizedDescription]];
+                    completionHandler(err, @"", nil);
+                    return;
+                }
+
+                int deleteResultCode = [[response objectForKey:@"resultCode"] intValue];
+                if (deleteResultCode != 0) {
+                    NSString *reason = [response objectForKey:@"userString"] ?: @"";
+                    NSError *err = [EEProvisioning _errorFromString:[@"deleteApplicationIdId: " stringByAppendingString:reason]];
+                    completionHandler(err, @"", nil);
+                    return;
+                }
+
+                // Look the list up again now that the stale entry is gone. This
+                // time it takes the add path, with the identifier we sign with.
+                // Only one retry: if the entry is still listed the deletion did
+                // not take, and looping would just hammer the portal.
+                [self _addOrUpdateApplicationID:applicationIdentifier
+                                applicationName:applicationName
+                                 binaryLocation:binaryLocation
+                                     systemType:systemType
+                                  allowRecreate:NO
+                          withCompletionHandler:completionHandler];
+            }];
+            return;
+        }
+
+        if (appIdExists && ![fullidentifier isEqualToString:applicationIdentifier]) {
+            // The stale entry survived the deletion. Signing with it would hand
+            // out a profile that does not cover this app, so stop rather than
+            // produce a build that iOS will not attribute to the developer.
+            NSError *err = [EEProvisioning _errorFromString:[NSString stringWithFormat:
+                @"The App ID '%@' still uses the identifier '%@' after it was deleted. Remove it at developer.apple.com and try again.",
+                applicationName, fullidentifier]];
+            completionHandler(err, @"", nil);
+            return;
         }
 
         // Setup values for this application.
