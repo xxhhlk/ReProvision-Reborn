@@ -14,6 +14,7 @@
 
 @interface RPVAdvancedController ()
 @property (nonatomic, readwrite) int daemonNotificationToken;
+@property (nonatomic, strong) NSDictionary *anisetteServerOptions;
 @end
 
 @implementation RPVAdvancedController
@@ -99,16 +100,38 @@
     [array addObject:threshold];
 
     PSSpecifier *anisetteGroup = [PSSpecifier groupSpecifierWithName:@"Anisette Server"];
-    [anisetteGroup setProperty:@"Remote anisette server used for Apple ID sign-in. Leave the default unless you operate your own server." forKey:@"footerText"];
+    [anisetteGroup setProperty:@"Remote Mac anisette server used for Apple ID sign-in. Apple only accepts a Mac-flavoured anisette now, so pick one from the list." forKey:@"footerText"];
     [array addObject:anisetteGroup];
 
-    PSSpecifier *anisetteURL = [PSSpecifier preferenceSpecifierNamed:@"Anisette Server URL" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:nil cell:PSEditTextCell edit:nil];
-    [anisetteURL setProperty:@"anisetteServerURL" forKey:@"key"];
-    [anisetteURL setProperty:@"https://ani.jkcoxson.com" forKey:@"default"];
-    [anisetteURL setProperty:@"https://ani.jkcoxson.com" forKey:@"placeholder"];
-    [array addObject:anisetteURL];
+    NSDictionary *servers = [self anisetteServerOptions];
+    NSArray *serverURLs = [servers allKeys];
+    NSArray *serverNames = [servers allValues];
+
+    PSSpecifier *anisetteServer = [PSSpecifier preferenceSpecifierNamed:@"Anisette Server" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
+    [anisetteServer setProperty:@"anisetteServerURL" forKey:@"key"];
+    [anisetteServer setProperty:@YES forKey:@"enabled"];
+    [anisetteServer setProperty:[serverURLs firstObject] forKey:@"default"];
+    anisetteServer.values = serverURLs;
+    anisetteServer.titleDictionary = [NSDictionary dictionaryWithObjects:serverNames forKeys:serverURLs];
+    anisetteServer.shortTitleDictionary = anisetteServer.titleDictionary;
+    [array addObject:anisetteServer];
 
     return array;
+}
+
+// Mac anisette servers verified to answer with a Mac-flavoured anisette.
+// Only these are selectable: Apple rejects anisette from other platforms.
+- (NSDictionary *)anisetteServerOptions {
+    if (_anisetteServerOptions == nil) {
+        _anisetteServerOptions = @{
+            @"https://ani.jkcoxson.com":      @"Jkcoxson",
+            @"https://mac-ani.jkcoxson.com":  @"Jkcoxson (Mac)",
+            @"https://ani3.stikstore.app":    @"Stikstore",
+            @"https://new.ani.sidestore.io":  @"SideStore (New)",
+            @"https://ani.iloader.app":       @"iloader",
+        };
+    }
+    return _anisetteServerOptions;
 }
 
 - (NSArray *)_errorHandlingSpecifiers {
@@ -177,6 +200,15 @@
 
 - (id)readPreferenceValue:(PSSpecifier *)value {
     NSString *key = [value propertyForKey:@"key"];
+
+    // The anisette picker must always resolve to one of its listed URLs,
+    // otherwise a stale or empty stored value leaves the row blank.
+    if ([key isEqualToString:@"anisetteServerURL"]) {
+        NSString *stored = [RPVResources preferenceValueForKey:key];
+        NSArray *urls = [[self anisetteServerOptions] allKeys];
+        return [urls containsObject:stored] ? stored : [urls firstObject];
+    }
+
     id val = [RPVResources preferenceValueForKey:key];
 
     if (!val) {
@@ -194,8 +226,6 @@
             return [NSNumber numberWithInt:2];
         } else if ([key isEqualToString:@"shouldAutoRevokeIfNeeded"]) {
             return [NSNumber numberWithBool:NO];
-        } else if ([key isEqualToString:@"anisetteServerURL"]) {
-            return @"https://ani.jkcoxson.com";
         }
 
         return nil;
