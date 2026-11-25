@@ -58,6 +58,10 @@
     [[EEAppleServices sharedInstance] requestTwoFactorLoginCodeWithCompletionHandler:completion];
 }
 
+- (void)requestLoginCodeWithDeliveryMode:(NSString *)deliveryMode completionHandler:(void (^)(NSError *error))completion {
+    [[EEAppleServices sharedInstance] requestTwoFactorLoginCodeWithDeliveryMode:deliveryMode completionHandler:completion];
+}
+
 - (BOOL)hasActiveTwoFactorSession {
     return [[EEAppleServices sharedInstance] hasActiveTwoFactorSession];
 }

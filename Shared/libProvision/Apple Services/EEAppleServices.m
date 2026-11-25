@@ -285,6 +285,10 @@ NSString *const REProtocolVersion = @"QH65B2";
     [self.authentication requestLoginCodeWithCompletion:completion];
 }
 
+- (void)requestTwoFactorLoginCodeWithDeliveryMode:(NSString *)deliveryMode completionHandler:(void (^)(NSError *))completion {
+    [self.authentication requestLoginCodeWithDeliveryMode:deliveryMode completion:completion];
+}
+
 - (BOOL)hasActiveTwoFactorSession {
     return [self.authentication hasActiveTwoFactorSession];
 }

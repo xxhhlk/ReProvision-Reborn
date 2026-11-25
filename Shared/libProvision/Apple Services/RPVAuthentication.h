@@ -26,6 +26,12 @@
 - (void)requestLoginCodeWithCompletion:(void(^)(NSError*))completionHandler;
 
 /**
+ Requests a login code delivered to the trusted phone number.
+ Pass "sms" or "voice" to choose how Apple sends it.
+ */
+- (void)requestLoginCodeWithDeliveryMode:(NSString *)deliveryMode completion:(void(^)(NSError*))completionHandler;
+
+/**
  Returns whether the current one-time 2FA context can still request or submit
  a verification code.
  */

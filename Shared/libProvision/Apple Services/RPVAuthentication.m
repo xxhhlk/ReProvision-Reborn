@@ -100,9 +100,14 @@
 }
 
 - (void)requestLoginCodeWithCompletion:(void(^)(NSError*))completionHandler {
+    [self requestLoginCodeWithDeliveryMode:nil completion:completionHandler];
+}
+
+- (void)requestLoginCodeWithDeliveryMode:(NSString *)deliveryMode completion:(void(^)(NSError*))completionHandler {
     [self.loginImpl requestTwoFactorCodeWithUserIdentity:self.cachedUserIdentityFor2FA
                                                idmsToken:self.cachedIdmsTokenFor2FA
                                                     mode:self.requested2FAMode
+                                            deliveryMode:deliveryMode
                                            andCompletion:completionHandler];
 }
 

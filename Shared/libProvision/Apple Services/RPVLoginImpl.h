@@ -28,6 +28,9 @@ typedef void (^RPVTwoFactorResultBlock)(NSError *error);
 
 - (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode andCompletion:(void (^)(NSError *error))completionHandler;
 
+/// Sends the code to a trusted phone number, choosing sms or voice.
+- (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode deliveryMode:(NSString *)deliveryMode andCompletion:(void (^)(NSError *error))completionHandler;
+
 - (void)submitTwoFactorCode:(NSString*)code withUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(RPVTwoFactorResultBlock)completionHandler;
 
 @end

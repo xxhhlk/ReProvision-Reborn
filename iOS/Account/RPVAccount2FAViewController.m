@@ -19,6 +19,7 @@
 @property (nonatomic) BOOL requestedCode;
 @property (nonatomic) BOOL authenticationInProgress;
 @property (nonatomic, strong) UIButton *requestCodeButton;
+@property (nonatomic, strong) UISegmentedControl *deliveryControl;
 
 @end
 
@@ -48,6 +49,18 @@
         self.passwordTextField = codeField;
     }
 
+    // Choose how Apple delivers the code: a text message or a phone call.
+    UISegmentedControl *delivery = [[UISegmentedControl alloc] initWithItems:@[@"Text Message", @"Phone Call"]];
+    delivery.translatesAutoresizingMaskIntoConstraints = NO;
+    delivery.selectedSegmentIndex = 0;
+    [self.view addSubview:delivery];
+    [NSLayoutConstraint activateConstraints:@[
+        [delivery.topAnchor constraintEqualToAnchor:self.passwordTextField.bottomAnchor constant:16.0],
+        [delivery.leadingAnchor constraintEqualToAnchor:self.passwordTextField.leadingAnchor],
+        [delivery.trailingAnchor constraintEqualToAnchor:self.passwordTextField.trailingAnchor],
+    ]];
+    self.deliveryControl = delivery;
+
     // Repurpose the Settings redirect button into a resend action.
     for (UIView *subview in self.view.subviews) {
         if (![subview isKindOfClass:[UIButton class]]) {
@@ -56,7 +69,7 @@
         UIButton *button = (UIButton *)subview;
         if ([[button titleForState:UIControlStateNormal] isEqualToString:@"Continue Authentication"]) {
             self.requestCodeButton = button;
-            [button setTitle:@"Send New Code" forState:UIControlStateNormal];
+            [button setTitle:@"Send Code" forState:UIControlStateNormal];
             break;
         }
     }
@@ -65,8 +78,14 @@
                                action:@selector(textFieldDidChange:)
                      forControlEvents:UIControlEventEditingChanged];
 
+    // Tapping anywhere outside the field dismisses the number pad.
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                         action:@selector(dismissKeyboard)];
+    tap.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:tap];
+
     self.titleLabel.text = @"2-Factor Authentication";
-    self.subtitleLabel.text = @"Enter the six-digit code Apple sent for this Apple ID.";
+    self.subtitleLabel.text = @"Choose how Apple should send the code, then tap Send Code.";
     self.confirmBarButtonItem.enabled = NO;
 
     if (@available(iOS 13.0, *)) {
@@ -78,6 +97,10 @@
         self.titleLabel.textColor = [UIColor blackColor];
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
+}
+
+- (void)dismissKeyboard {
+    [self.view endEditing:YES];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -128,6 +151,10 @@
     [self textFieldDidChange:self.passwordTextField];
 }
 
+- (NSString *)selectedDeliveryMode {
+    return self.deliveryControl.selectedSegmentIndex == 1 ? @"voice" : @"sms";
+}
+
 - (void)requestVerificationCode {
     if (self.authenticationInProgress) {
         return;
@@ -139,16 +166,23 @@
         return;
     }
 
+    [self dismissKeyboard];
+
     self.authenticationInProgress = YES;
     self.passwordTextField.text = @"";
     self.requestCodeButton.enabled = NO;
     self.confirmBarButtonItem.enabled = NO;
+    self.deliveryControl.enabled = NO;
     [self showNavigationSpinner];
 
-    [[RPVAccountChecker sharedInstance] requestLoginCodeWithCompletionHandler:^(NSError *error) {
+    NSString *deliveryMode = [self selectedDeliveryMode];
+    NSString *channel = [deliveryMode isEqualToString:@"voice"] ? @"call" : @"text message";
+
+    [[RPVAccountChecker sharedInstance] requestLoginCodeWithDeliveryMode:deliveryMode completionHandler:^(NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             self.authenticationInProgress = NO;
             self.requestCodeButton.enabled = YES;
+            self.deliveryControl.enabled = YES;
             [self restoreNavigationButton];
 
             if (error) {
@@ -161,7 +195,8 @@
             }
 
             self.requestedCode = YES;
-            self.subtitleLabel.text = @"Enter the newest six-digit code Apple sent. Requesting another code invalidates older ones.";
+            self.subtitleLabel.text = [NSString stringWithFormat:
+                @"Enter the six-digit code Apple sent by %@. Requesting another code invalidates older ones.", channel];
             [self.passwordTextField becomeFirstResponder];
         });
     }];
@@ -176,11 +211,14 @@
         return;
     }
 
+    [self dismissKeyboard];
+
     NSString *code = [self.passwordTextField.text copy];
     self.authenticationInProgress = YES;
     self.passwordTextField.enabled = NO;
     self.requestCodeButton.enabled = NO;
     self.confirmBarButtonItem.enabled = NO;
+    self.deliveryControl.enabled = NO;
     [self showNavigationSpinner];
 
     [[RPVAccountChecker sharedInstance] validateLoginCode:code withCompletionHandler:^(NSString *failureReason, NSString *resultCode, NSArray *teamIDArray, NSURLCredential *credential) {
@@ -189,6 +227,7 @@
             self.authenticationInProgress = NO;
             self.passwordTextField.enabled = YES;
             self.requestCodeButton.enabled = hasActiveSession;
+            self.deliveryControl.enabled = YES;
             [self restoreNavigationButton];
 
             if (teamIDArray.count > 0 && credential) {

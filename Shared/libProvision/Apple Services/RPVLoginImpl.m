@@ -285,6 +285,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
 @property (nonatomic, strong) NSDictionary *lookupURLs;
 
+// Trusted phone number the current 2FA code was sent to, and how.
+@property (nonatomic, strong) NSString *twoFactorPhoneNumberID;
+@property (nonatomic, strong) NSString *twoFactorPhoneDeliveryMode;
+
 #if TARGET_OS_IOS
 @property (nonatomic, readwrite) struct ccrng_state *rngState;
 #endif
@@ -294,6 +298,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (NSURLSession *)_gsaEphemeralSession;
 - (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
+- (NSDictionary *)_phoneDescriptorFromAuthResponse:(NSDictionary *)response;
+- (NSMutableURLRequest *)_twoFactorRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
+- (NSMutableURLRequest *)_twoFactorJSONRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
+- (void)_performTwoFactorCodeRequest:(NSMutableURLRequest *)request completion:(void (^)(NSError *error))completionHandler;
+- (void)_submitPhoneVerificationCode:(NSString *)code userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token completion:(RPVTwoFactorResultBlock)completionHandler;
 
 @end
 
@@ -1054,7 +1063,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     }];
 }
 
-- (void)_checkAuthEndpointWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(void (^)(NSError *error, NSArray *deviceIds))completionHandler {
+// Apple lists the trusted phone numbers for the account at /auth. Read the
+// first one together with its delivery mode so a code can be sent to it.
+- (void)_checkAuthEndpointWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(void (^)(NSError *error, NSDictionary *phoneDescriptor))completionHandler {
     
     NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
     
@@ -1100,49 +1111,162 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         
         if (!data || error) {
             log_debug("NO DATA OR ERROR");
-            completionHandler(error, @[]);
-        } else {
-            // Parse the response
-            NSError *parseError;
-            NSDictionary *responseDictionary = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:&parseError];
-            
-            if (responseDictionary) {
-                log_debug("Reponse: %s", responseDictionary.description.UTF8String);
-            }
-            
-            // TODO: Something with the response
-            completionHandler(nil, @[]);
+            completionHandler(error, nil);
+            return;
         }
+
+        // The endpoint answers with a plist on older iOS and JSON on newer.
+        id object = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:nil];
+        if (![object isKindOfClass:[NSDictionary class]]) {
+            object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        }
+        if (![object isKindOfClass:[NSDictionary class]]) {
+            completionHandler([self createError:@"Apple returned an unreadable list of trusted numbers" :RPVInternalLoginError], nil);
+            return;
+        }
+
+        log_debug("Reponse: %s", ((NSDictionary *)object).description.UTF8String);
+
+        NSDictionary *descriptor = [self _phoneDescriptorFromAuthResponse:object];
+        if (descriptor.count == 0) {
+            completionHandler([self createError:@"This Apple ID has no trusted phone number that can receive a code." :RPVInternalLoginError], nil);
+            return;
+        }
+        completionHandler(nil, descriptor);
     }];
     [task resume];
 }
 
-- (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode andCompletion:(void (^)(NSError *error))completionHandler {
-    
-    // Parse the real dsid out of the identity
-    NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
-    
-    // Change URL depending on the mode
-    NSURL *URL = nil;
-    if (mode == RPVInternalLogin2FARequiredTrustedDeviceError) {
-        URL = self.lookupURLs ?
-                [NSURL URLWithString:[self.lookupURLs objectForKey:@"trustedDeviceSecondaryAuth"]] :
-                [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/trusteddevice"];
-    } else {
-        URL = [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/phone/put?mode=sms&referrer=/auth/verify/trusteddevice"];
+// Walk the containers Apple may nest the numbers in, then take the first entry
+// that carries an id. Delivery mode defaults to sms.
+- (NSDictionary *)_phoneDescriptorFromAuthResponse:(NSDictionary *)response {
+    NSMutableArray<NSDictionary *> *containers = [NSMutableArray arrayWithObject:response];
+    for (NSString *key in @[@"Response", @"response", @"serverInfo", @"ServerInfo"]) {
+        NSDictionary *container = response[key];
+        if ([container isKindOfClass:[NSDictionary class]]) {
+            [containers addObject:container];
+            NSDictionary *serverInfo = container[@"serverInfo"] ?: container[@"ServerInfo"];
+            if ([serverInfo isKindOfClass:[NSDictionary class]]) {
+                [containers addObject:serverInfo];
+            }
+        }
     }
-    
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
-    
-    log_debug("Request to: %s", URL.description.UTF8String);
-    
+
+    for (NSDictionary *container in containers) {
+        NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+        for (NSString *key in @[@"trustedPhoneNumber", @"phoneNumber"]) {
+            NSDictionary *candidate = container[key];
+            if ([candidate isKindOfClass:[NSDictionary class]]) {
+                [candidates addObject:candidate];
+            }
+        }
+        NSArray *trusted = container[@"trustedPhoneNumbers"];
+        if ([trusted isKindOfClass:[NSArray class]]) {
+            for (id candidate in trusted) {
+                if ([candidate isKindOfClass:[NSDictionary class]]) {
+                    [candidates addObject:candidate];
+                }
+            }
+        }
+
+        for (NSDictionary *candidate in candidates) {
+            id rawIdentifier = candidate[@"id"] ?: candidate[@"phoneNumber.id"];
+            NSString *identifier = [rawIdentifier respondsToSelector:@selector(stringValue)]
+                ? [rawIdentifier stringValue]
+                : ([rawIdentifier isKindOfClass:[NSString class]] ? rawIdentifier : nil);
+            if (identifier.length == 0) {
+                continue;
+            }
+
+            NSString *rawMode = candidate[@"pushMode"] ?: candidate[@"mode"] ?: container[@"mode"];
+            NSString *mode = [rawMode.lowercaseString isEqualToString:@"voice"] ? @"voice" : @"sms";
+
+            NSString *number = candidate[@"numberWithDialCode"] ?: candidate[@"obfuscatedNumber"] ?: candidate[@"number"];
+            NSLog(@"[DIAG] trusted number id=%@ mode=%@ number=%@", identifier, mode, [number isKindOfClass:[NSString class]] ? number : @"-");
+
+            return @{
+                @"id": identifier,
+                @"mode": mode,
+                @"number": [number isKindOfClass:[NSString class]] ? number : @"",
+            };
+        }
+    }
+
+    return @{};
+}
+
+// Sends the verification code. For a trusted-device prompt Apple pushes to the
+// device; for a phone number the caller picks sms or voice. The number has to
+// be listed first, because the request body must carry its id.
+- (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode andCompletion:(void (^)(NSError *error))completionHandler {
+    [self requestTwoFactorCodeWithUserIdentity:userIdentity
+                                     idmsToken:token
+                                          mode:mode
+                                 deliveryMode:nil
+                                andCompletion:completionHandler];
+}
+
+- (void)requestTwoFactorCodeWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token mode:(int)mode deliveryMode:(NSString *)requestedDeliveryMode andCompletion:(void (^)(NSError *error))completionHandler {
+
+    if (mode == RPVInternalLogin2FARequiredTrustedDeviceError) {
+        self.twoFactorPhoneNumberID = nil;
+        self.twoFactorPhoneDeliveryMode = nil;
+        NSURL *URL = self.lookupURLs ?
+            [NSURL URLWithString:[self.lookupURLs objectForKey:@"trustedDeviceSecondaryAuth"]] :
+            [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/trusteddevice"];
+
+        NSMutableURLRequest *request = [self _twoFactorRequestWithURL:URL
+                                                         userIdentity:userIdentity
+                                                            idmsToken:token];
+        [self _performTwoFactorCodeRequest:request completion:completionHandler];
+        return;
+    }
+
+    if (mode != RPVInternalLogin2FARequiredSecondaryAuthError) {
+        completionHandler([self createError:@"Apple returned an unsupported two-factor authentication mode" :RPVInternalLoginError]);
+        return;
+    }
+
+    [self _checkAuthEndpointWithUserIdentity:userIdentity idmsToken:token andCompletion:^(NSError *error, NSDictionary *phoneDescriptor) {
+        if (error) {
+            completionHandler(error);
+            return;
+        }
+
+        NSString *phoneNumberID = phoneDescriptor[@"id"];
+        NSString *deliveryMode = requestedDeliveryMode.length > 0 ? requestedDeliveryMode : phoneDescriptor[@"mode"];
+        deliveryMode = [deliveryMode.lowercaseString isEqualToString:@"voice"] ? @"voice" : @"sms";
+        self.twoFactorPhoneNumberID = phoneNumberID;
+        self.twoFactorPhoneDeliveryMode = deliveryMode;
+
+        NSURL *URL = [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/phone"];
+        NSMutableURLRequest *request = [self _twoFactorJSONRequestWithURL:URL
+                                                             userIdentity:userIdentity
+                                                                idmsToken:token];
+        request.HTTPMethod = @"PUT";
+        request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{
+            @"phoneNumber": @{ @"id": @([phoneNumberID integerValue]) },
+            @"mode": deliveryMode
+        } options:0 error:nil];
+
+        NSLog(@"[DIAG] 2FA code request id=%@ mode=%@", phoneNumberID, deliveryMode);
+        [self _performTwoFactorCodeRequest:request completion:completionHandler];
+    }];
+}
+
+- (NSMutableURLRequest *)_twoFactorRequestWithURL:(NSURL *)URL
+                                     userIdentity:(NSString *)userIdentity
+                                        idmsToken:(NSString *)token {
+    NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
+    if (dsid.length == 0 || token.length == 0) {
+        return nil;
+    }
+
     NSString *identityToken = [NSString stringWithFormat:@"%@:%@", dsid, token];
-    
-    NSData *identityTokenData = [identityToken dataUsingEncoding:NSUTF8StringEncoding];
-    NSString *encodedIdentityToken = [identityTokenData base64EncodedStringWithOptions:0];
-    
-    // Sort out headers
-    NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
+    NSString *encodedIdentityToken = [[identityToken dataUsingEncoding:NSUTF8StringEncoding]
+        base64EncodedStringWithOptions:0];
+
+    NSMutableDictionary<NSString *, NSString *> *headers = [@{
         @"Content-Type": @"text/x-xml-plist",
         @"User-Agent": RPVGrandSlamUserAgent,
         @"Accept": @"text/x-xml-plist",
@@ -1152,57 +1276,60 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
         @"X-Apple-Identity-Token": encodedIdentityToken,
     } mutableCopy];
-    
-    [httpHeaders addEntriesFromDictionary:[self _anisetteData]];
-    [httpHeaders addEntriesFromDictionary:[self _deviceData]];
-    
-    [httpHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
+
+    [headers addEntriesFromDictionary:[self _anisetteData]];
+    [headers addEntriesFromDictionary:[self _deviceData]];
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
+    [headers enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
         [request setValue:value forHTTPHeaderField:key];
     }];
-    
     [request setValue:self.clientInfoOverride forHTTPHeaderField:@"X-MMe-Client-Info"];
-    
-    log_debug("Request Headers: %s", httpHeaders.description.UTF8String);
-    
-    // Match post data used by Preferences
-    if (mode == RPVInternalLogin2FARequiredSecondaryAuthError) {
-        // This really should be querying https://gsa.apple.com/auth/ for available numbers?
-        NSDictionary *postData = @{
-            @"serverInfo": @{
-                @"phoneNumber.id": @"1"
-            },
-        };
-        
-        request.HTTPMethod = @"POST";
-        request.HTTPBody = [NSPropertyListSerialization dataWithPropertyList:postData
-                                                                      format:NSPropertyListXMLFormat_v1_0
-                                                                     options:0
-                                                                       error:nil];
-        
-        [self _checkAuthEndpointWithUserIdentity:userIdentity idmsToken:token andCompletion:^(NSError *error, NSArray *deviceIds) {
-            
-        }];
+    return request;
+}
+
+- (NSMutableURLRequest *)_twoFactorJSONRequestWithURL:(NSURL *)URL
+                                         userIdentity:(NSString *)userIdentity
+                                            idmsToken:(NSString *)token {
+    NSMutableURLRequest *request = [self _twoFactorRequestWithURL:URL userIdentity:userIdentity idmsToken:token];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+    return request;
+}
+
+- (void)_performTwoFactorCodeRequest:(NSMutableURLRequest *)request completion:(void (^)(NSError *error))completionHandler {
+    if (!request) {
+        completionHandler([self createError:@"The Apple authentication request could not be created" :RPVInternalLoginError]);
+        return;
     }
-    
-    // Do the request
+
+    log_debug("Request to: %s", request.URL.description.UTF8String);
+
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        
-        log_debug("Response code: %ld", (long)[(NSHTTPURLResponse*)response statusCode]);
-        
-        if (!data || error) {
+
+        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+        NSLog(@"[DIAG] 2FA code request HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+
+        if (error) {
             completionHandler(error);
-        } else {
-            // Parse the response
-            NSError *parseError;
-            NSDictionary *responseDictionary = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:&parseError];
-            
-            if (responseDictionary) {
-                log_debug("Reponse: %s", responseDictionary.description.UTF8String);
-            }
-            
-            completionHandler(nil);
+            return;
         }
+
+        if (httpCode >= 200 && httpCode < 300) {
+            completionHandler(nil);
+            return;
+        }
+
+        // Surface what Apple said instead of a bare status code.
+        NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (raw.length > 300) {
+            raw = [raw substringToIndex:300];
+        }
+        NSLog(@"[DIAG] 2FA code request failed raw=%@", raw);
+        completionHandler([self createError:[NSString stringWithFormat:@"Apple did not send a code (HTTP %ld). %@", httpCode, raw ?: @""]
+                                           :RPVInternalLoginError]);
     }];
     [task resume];
 }
@@ -1214,6 +1341,16 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     if (normalizedCode.length != 6) {
         completionHandler([self createError:@"The verification code must contain exactly six digits"
                                            :RPVInternalLoginInvalid2FAFormatError]);
+        return;
+    }
+
+    // A code delivered to a phone number is validated against that number;
+    // only the on-device prompt uses the GrandSlam validate endpoint.
+    if (self.twoFactorPhoneNumberID.length > 0 && self.twoFactorPhoneDeliveryMode.length > 0) {
+        [self _submitPhoneVerificationCode:normalizedCode
+                              userIdentity:userIdentity
+                                 idmsToken:token
+                                completion:completionHandler];
         return;
     }
 
@@ -1295,6 +1432,60 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                 completionHandler(responseError);
             }
         }
+    }];
+    [task resume];
+}
+
+// Validates a code that Apple delivered to the trusted phone number.
+- (void)_submitPhoneVerificationCode:(NSString *)code userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token completion:(RPVTwoFactorResultBlock)completionHandler {
+    NSURL *URL = [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/phone/securitycode"];
+    NSMutableURLRequest *request = [self _twoFactorJSONRequestWithURL:URL
+                                                         userIdentity:userIdentity
+                                                            idmsToken:token];
+    if (!request) {
+        completionHandler([self createError:@"The Apple authentication request could not be created" :RPVInternalLoginError]);
+        return;
+    }
+
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{
+        @"securityCode": @{ @"code": code },
+        @"phoneNumber": @{ @"id": @([self.twoFactorPhoneNumberID integerValue]) },
+        @"mode": self.twoFactorPhoneDeliveryMode
+    } options:0 error:nil];
+
+    NSLog(@"[DIAG] 2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode);
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+
+        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+        NSLog(@"[DIAG] 2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+
+        if (error) {
+            completionHandler(error);
+            return;
+        }
+
+        if (httpCode >= 200 && httpCode < 300) {
+            completionHandler(nil);
+            return;
+        }
+
+        NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (raw.length > 300) {
+            raw = [raw substringToIndex:300];
+        }
+        NSLog(@"[DIAG] 2FA submit failed raw=%@", raw);
+
+        if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
+            completionHandler([self createError:@"Apple did not accept that verification code. Request a new code and try again."
+                                               :RPVInternalLoginIncorrect2FACodeError]);
+            return;
+        }
+        completionHandler([self createError:[NSString stringWithFormat:@"Apple could not verify that code (HTTP %ld).", httpCode]
+                                           :RPVInternalLoginError]);
     }];
     [task resume];
 }
