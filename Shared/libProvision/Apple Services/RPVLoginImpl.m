@@ -42,11 +42,6 @@ static NSDate *RPVAnisetteFetchedAt = nil;
 // keeps using this one even after GSA rotates its cache.
 static NSDictionary *RPVPortalAnisetteHeaders = nil;
 
-// The token outlives the process, so the identity that minted it has to be
-// persisted too; otherwise the next launch presents a fresh anisette and the
-// portal answers resultCode 1100 ("Your session has expired").
-static NSString * const RPVPortalAnisetteDefaultsKey = @"RPVPortalAnisetteSnapshot";
-
 struct ccrng_state *ccDRBGGetRngState(void);
 
 // On this device syslog is not running and there is no `log` tool, so NSLog
@@ -454,6 +449,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         }
     }
     NSString *storedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
+    // new.ani.sidestore.io hands out a different X-Mme-Device-Id on every call,
+    // which makes Developer Services reject the token with 1100 later on, so the
+    // default is a server with a stable identity.
     NSString *urlString = (storedURL && storedURL.length > 0) ? storedURL : @"https://ani.jkcoxson.com";
     NSURL *url = [NSURL URLWithString:urlString];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
@@ -479,6 +477,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         self.clientInfoOverride = remoteClientInfo;
     }
     NSLog(@"[DIAG] remote anisette OK rininfo=%@ mdlu=%@ client=%@", [json objectForKey:@"X-Apple-I-MD-RINFO"], [json objectForKey:@"X-Apple-I-MD-LU"] ? @"yes" : @"no", remoteClientInfo);
+    RPV2FAWriteLog([NSString stringWithFormat:@"anisette fetched server=%@ device=%@", urlString, [json objectForKey:@"X-Mme-Device-Id"] ?: @"-"]);
     @synchronized (self) { RPVAnisetteHeaders = json; RPVAnisetteFetchedAt = [NSDate date]; }
     return json;
 }
@@ -486,25 +485,14 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 // The anisette identity currently in use. Developer Services rejects a token
 // presented with a different identity than the one that minted it.
 - (NSDictionary *)currentAnisetteHeaders {
-    // Developer Services must present the identity that minted the token, so
-    // prefer the frozen snapshot over whatever GSA is using right now.
+    // Developer Services must present the identity that minted the token. The
+    // attestation itself is a one-shot OTP, so this can only be the copy from
+    // the current run; a relaunch has to log in again, which re-mints both.
     @synchronized (self) {
         if (RPVPortalAnisetteHeaders.count > 0) {
             return RPVPortalAnisetteHeaders;
         }
-        if (RPVAnisetteHeaders.count > 0) {
-            return RPVAnisetteHeaders;
-        }
     }
-
-    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:RPVPortalAnisetteDefaultsKey];
-    if ([stored isKindOfClass:[NSDictionary class]] && [stored count] > 0) {
-        RPV2FAWriteLog(@"anisette restored from disk for Developer Services");
-        @synchronized (self) { RPVPortalAnisetteHeaders = stored; }
-        return stored;
-    }
-
-    RPV2FAWriteLog(@"anisette fetched fresh for Developer Services (no snapshot)");
     return [self _anisetteData];
 }
 
@@ -1293,14 +1281,8 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSString *token = decryptedTokDict[@"t"][app][@"token"];
     RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ok tokenLen=%lu", (unsigned long)token.length]);
     if (token.length > 0) {
-        // Freeze the identity that minted this token for Developer Services,
-        // both in memory and on disk so a relaunch keeps presenting it.
+        // Freeze the identity that minted this token for Developer Services.
         @synchronized (self) { RPVPortalAnisetteHeaders = RPVAnisetteHeaders; }
-        if (RPVAnisetteHeaders.count > 0) {
-            [[NSUserDefaults standardUserDefaults] setObject:RPVAnisetteHeaders
-                                                      forKey:RPVPortalAnisetteDefaultsKey];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-        }
     }
     completionHandler(nil, token);
 }
