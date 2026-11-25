@@ -452,6 +452,7 @@
 		C974029223B6381D00BA9B25 /* doc_44.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = doc_44.png; path = "Icons/iOS Sharing/doc_44.png"; sourceTree = SOURCE_ROOT; };
 		C97C5F5B238B20FB0042638C /* RPVLoginImpl.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVLoginImpl.m; sourceTree = "<group>"; };
 		A1B2C3D4E5F6000000000002 /* RPVRemoteAnisetteProvider.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RPVRemoteAnisetteProvider.m; sourceTree = "<group>"; };
+		A1B2C3D4E5F6000000000003 /* RPVRemoteAnisetteProvider.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVRemoteAnisetteProvider.h; sourceTree = "<group>"; };
 		C97C5F5C238B20FB0042638C /* RPVLoginImpl.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVLoginImpl.h; sourceTree = "<group>"; };
 		C97EF5B920F6AA3B005CB1DB /* RMessageDesign.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = RMessageDesign.json; sourceTree = "<group>"; };
 		C985A50A23A582F200A443A9 /* RPVLoginFallbackImpl.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RPVLoginFallbackImpl.h; sourceTree = "<group>"; };
@@ -1208,6 +1209,7 @@
 				C9C6EA7A2004280A00211FDD /* NSData+GZIP.m */,
 				C97C5F5C238B20FB0042638C /* RPVLoginImpl.h */,
 				C97C5F5B238B20FB0042638C /* RPVLoginImpl.m */,
+				A1B2C3D4E5F6000000000003 /* RPVRemoteAnisetteProvider.h */,
 				A1B2C3D4E5F6000000000002 /* RPVRemoteAnisetteProvider.m */,
 				C985A50A23A582F200A443A9 /* RPVLoginFallbackImpl.h */,
 				C985A50B23A582F200A443A9 /* RPVLoginFallbackImpl.m */,

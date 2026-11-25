@@ -9,12 +9,14 @@
 #import "RPVAdvancedController.h"
 #import "AppDelegate.h"
 #import "RPVResources.h"
+#import "RPVRemoteAnisetteProvider.h"
 
 #include <notify.h>
 
 @interface RPVAdvancedController ()
 @property (nonatomic, readwrite) int daemonNotificationToken;
-@property (nonatomic, strong) NSDictionary *anisetteServerOptions;
+@property (nonatomic, strong) NSArray *anisetteServerURLs;
+- (NSDictionary *)anisetteServerTitles;
 @end
 
 @implementation RPVAdvancedController
@@ -100,17 +102,19 @@
     [array addObject:threshold];
 
     PSSpecifier *anisetteGroup = [PSSpecifier groupSpecifierWithName:@"Anisette Server"];
-    [anisetteGroup setProperty:@"Remote Mac anisette server used for Apple ID sign-in. Apple only accepts a Mac-flavoured anisette now, so pick one from the list." forKey:@"footerText"];
+    [anisetteGroup setProperty:@"Remote anisette server used for Apple ID sign-in. The device keeps its own ADI identity, so the server only computes attestations; switching servers makes the current Apple ID session stale and asks for the password again." forKey:@"footerText"];
     [array addObject:anisetteGroup];
 
-    NSDictionary *servers = [self anisetteServerOptions];
-    NSArray *serverURLs = [servers allKeys];
-    NSArray *serverNames = [servers allValues];
+    NSArray *serverURLs = [self anisetteServerURLs];
+    NSMutableArray *serverNames = [NSMutableArray array];
+    for (NSString *URLString in serverURLs) {
+        [serverNames addObject:[[self anisetteServerTitles] objectForKey:URLString]];
+    }
 
     PSSpecifier *anisetteServer = [PSSpecifier preferenceSpecifierNamed:@"Anisette Server" target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:) detail:NSClassFromString(@"PSListItemsController") cell:PSLinkListCell edit:nil];
     [anisetteServer setProperty:@"anisetteServerURL" forKey:@"key"];
     [anisetteServer setProperty:@YES forKey:@"enabled"];
-    [anisetteServer setProperty:[serverURLs firstObject] forKey:@"default"];
+    [anisetteServer setProperty:[@"https://" stringByAppendingString:RPVAnisetteDefaultServer] forKey:@"default"];
     anisetteServer.values = serverURLs;
     anisetteServer.titleDictionary = [NSDictionary dictionaryWithObjects:serverNames forKeys:serverURLs];
     anisetteServer.shortTitleDictionary = anisetteServer.titleDictionary;
@@ -119,19 +123,30 @@
     return array;
 }
 
-// Mac anisette servers, labelled with the ADI provisioning version they report.
-// Apple rejects 0x02050500 with -36607 before it checks the password, so only
-// the 0x04050500 ones can actually sign in.
-- (NSDictionary *)anisetteServerOptions {
-    if (_anisetteServerOptions == nil) {
-        _anisetteServerOptions = @{
-            @"https://new.ani.sidestore.io":  @"SideStore (works)",
-            @"https://ani.jkcoxson.com":      @"Jkcoxson (too old)",
-            @"https://mac-ani.jkcoxson.com":  @"Jkcoxson Mac (too old)",
-            @"https://ani3.stikstore.app":    @"Stikstore (too old)",
-        };
+// Every listed server speaks the anisette v3 protocol, which is all that
+// matters: the ADI identity lives in the adi_pb provisioned on this device, so
+// the server never decides who Apple thinks we are. The old ADI version labels
+// were misleading - mac-ani.jkcoxson.com reports a lower routing info than the
+// servers it was being compared against and still signs in fine.
+- (NSArray *)anisetteServerURLs {
+    if (_anisetteServerURLs == nil) {
+        _anisetteServerURLs = @[
+            @"https://mac-ani.jkcoxson.com",
+            @"https://new.ani.sidestore.io",
+            @"https://ani.jkcoxson.com",
+            @"https://ani3.stikstore.app",
+        ];
     }
-    return _anisetteServerOptions;
+    return _anisetteServerURLs;
+}
+
+- (NSDictionary *)anisetteServerTitles {
+    return @{
+        @"https://mac-ani.jkcoxson.com":  @"Jkcoxson Mac",
+        @"https://new.ani.sidestore.io":  @"SideStore",
+        @"https://ani.jkcoxson.com":      @"Jkcoxson",
+        @"https://ani3.stikstore.app":    @"Stikstore",
+    };
 }
 
 - (NSArray *)_errorHandlingSpecifiers {
@@ -205,8 +220,12 @@
     // otherwise a stale or empty stored value leaves the row blank.
     if ([key isEqualToString:@"anisetteServerURL"]) {
         NSString *stored = [RPVResources preferenceValueForKey:key];
-        NSArray *urls = [[self anisetteServerOptions] allKeys];
-        return [urls containsObject:stored] ? stored : [urls firstObject];
+        NSArray *urls = [self anisetteServerURLs];
+        if ([urls containsObject:stored]) {
+            return stored;
+        }
+        NSString *fallback = [@"https://" stringByAppendingString:RPVAnisetteDefaultServer];
+        return [urls containsObject:fallback] ? fallback : [urls firstObject];
     }
 
     id val = [RPVResources preferenceValueForKey:key];
