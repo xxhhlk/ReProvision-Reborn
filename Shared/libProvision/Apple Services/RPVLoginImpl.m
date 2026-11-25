@@ -299,7 +299,8 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (void)_performGSADataRequest:(NSMutableURLRequest *)request attempt:(NSUInteger)attempt completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler;
 - (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
-- (NSDictionary *)_phoneDescriptorFromAuthResponse:(NSDictionary *)response;
+- (NSDictionary *)_phoneDescriptorFromAuthResponse:(id)response;
+- (void)_collectPhoneCandidates:(id)node into:(NSMutableArray *)out;
 - (NSMutableURLRequest *)_twoFactorRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
 - (NSMutableURLRequest *)_twoFactorJSONRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
 - (void)_performTwoFactorCodeRequest:(NSMutableURLRequest *)request completion:(void (^)(NSError *error))completionHandler;
@@ -1168,14 +1169,16 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             return;
         }
 
-        // The endpoint answers with a plist on older iOS and JSON on newer.
+        // The endpoint answers with a plist on older iOS and JSON on newer. The
+        // root may be a dictionary or, depending on the account, a top-level
+        // array of number objects, so accept both.
         id object = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:nil];
-        if (![object isKindOfClass:[NSDictionary class]]) {
+        if (![object isKindOfClass:[NSDictionary class]] && ![object isKindOfClass:[NSArray class]]) {
             object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         }
-        if (![object isKindOfClass:[NSDictionary class]]) {
-            // Apple answered with something else (typically an HTML 503 from the
-            // edge). Surface a slice of it so the cause is visible in the log.
+        if (![object isKindOfClass:[NSDictionary class]] && ![object isKindOfClass:[NSArray class]]) {
+            // Apple answered with something else (typically an HTML page). Surface
+            // a slice of it so the cause is visible in the log.
             NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             if (!raw) raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
             if (raw.length > 500) raw = [raw substringToIndex:500];
@@ -1183,11 +1186,19 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             completionHandler([self createError:[NSString stringWithFormat:@"Apple returned an unreadable list of trusted numbers (HTTP %ld). %@", httpCode, raw ?: @""] :RPVInternalLoginError], nil);
             return;
         }
+        NSLog(@"[DIAG] /auth parsed root=%@", [object isKindOfClass:[NSArray class]] ? @"array" : @"dict");
 
-        log_debug("Reponse: %s", ((NSDictionary *)object).description.UTF8String);
+        log_debug("Reponse: %s", ((NSObject *)object).description.UTF8String);
 
         NSDictionary *descriptor = [self _phoneDescriptorFromAuthResponse:object];
         if (descriptor.count == 0) {
+            // No number found: dump the top-level keys (or first elements) so the
+            // actual structure is visible when a real number list is expected.
+            if ([object isKindOfClass:[NSDictionary class]]) {
+                NSLog(@"[DIAG] /auth no number, keys=%@", [[object allKeys] sortedArrayUsingSelector:@selector(compare:)]);
+            } else if ([object isKindOfClass:[NSArray class]] && object.count > 0) {
+                NSLog(@"[DIAG] /auth no number, first=%@", [object[0] description]);
+            }
             completionHandler([self createError:@"This Apple ID has no trusted phone number that can receive a code." :RPVInternalLoginError], nil);
             return;
         }
@@ -1195,62 +1206,74 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     }];
 }
 
-// Walk the containers Apple may nest the numbers in, then take the first entry
-// that carries an id. Delivery mode defaults to sms.
-- (NSDictionary *)_phoneDescriptorFromAuthResponse:(NSDictionary *)response {
-    NSMutableArray<NSDictionary *> *containers = [NSMutableArray arrayWithObject:response];
-    for (NSString *key in @[@"Response", @"response", @"serverInfo", @"ServerInfo"]) {
-        NSDictionary *container = response[key];
-        if ([container isKindOfClass:[NSDictionary class]]) {
-            [containers addObject:container];
-            NSDictionary *serverInfo = container[@"serverInfo"] ?: container[@"ServerInfo"];
-            if ([serverInfo isKindOfClass:[NSDictionary class]]) {
-                [containers addObject:serverInfo];
-            }
+// Collects every dictionary that looks like a trusted phone number (has a usable
+// id) from anywhere in the parsed /auth response, then returns the first one
+// together with its delivery mode. Handles a dictionary root, a top-level array
+// root, and arbitrary nesting under Response / serverInfo / trustedPhoneNumbers.
+- (NSDictionary *)_phoneDescriptorFromAuthResponse:(id)response {
+    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
+    [self _collectPhoneCandidates:response into:candidates];
+
+    // Prefer a candidate that also carries a number; fall back to the first one
+    // that only has an id. This avoids mistaking a random id-bearing object for
+    // a phone number when the response nests other entities.
+    NSDictionary *pick = nil;
+    for (NSDictionary *candidate in candidates) {
+        NSString *number = candidate[@"numberWithDialCode"] ?: candidate[@"obfuscatedNumber"] ?: candidate[@"number"];
+        if ([number isKindOfClass:[NSString class]] && number.length > 0) {
+            pick = candidate;
+            break;
         }
     }
-
-    for (NSDictionary *container in containers) {
-        NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
-        for (NSString *key in @[@"trustedPhoneNumber", @"phoneNumber"]) {
-            NSDictionary *candidate = container[key];
-            if ([candidate isKindOfClass:[NSDictionary class]]) {
-                [candidates addObject:candidate];
-            }
-        }
-        NSArray *trusted = container[@"trustedPhoneNumbers"];
-        if ([trusted isKindOfClass:[NSArray class]]) {
-            for (id candidate in trusted) {
-                if ([candidate isKindOfClass:[NSDictionary class]]) {
-                    [candidates addObject:candidate];
-                }
-            }
-        }
-
-        for (NSDictionary *candidate in candidates) {
-            id rawIdentifier = candidate[@"id"] ?: candidate[@"phoneNumber.id"];
-            NSString *identifier = [rawIdentifier respondsToSelector:@selector(stringValue)]
-                ? [rawIdentifier stringValue]
-                : ([rawIdentifier isKindOfClass:[NSString class]] ? rawIdentifier : nil);
-            if (identifier.length == 0) {
-                continue;
-            }
-
-            NSString *rawMode = candidate[@"pushMode"] ?: candidate[@"mode"] ?: container[@"mode"];
-            NSString *mode = [rawMode.lowercaseString isEqualToString:@"voice"] ? @"voice" : @"sms";
-
-            NSString *number = candidate[@"numberWithDialCode"] ?: candidate[@"obfuscatedNumber"] ?: candidate[@"number"];
-            NSLog(@"[DIAG] trusted number id=%@ mode=%@ number=%@", identifier, mode, [number isKindOfClass:[NSString class]] ? number : @"-");
-
-            return @{
-                @"id": identifier,
-                @"mode": mode,
-                @"number": [number isKindOfClass:[NSString class]] ? number : @"",
-            };
-        }
+    if (!pick && candidates.count > 0) {
+        pick = candidates[0];
     }
 
-    return @{};
+    if (!pick) {
+        return @{};
+    }
+
+    id rawIdentifier = pick[@"id"] ?: pick[@"phoneNumber.id"];
+    NSString *identifier = [rawIdentifier respondsToSelector:@selector(stringValue)]
+        ? [rawIdentifier stringValue]
+        : ([rawIdentifier isKindOfClass:[NSString class]] ? rawIdentifier : nil);
+    if (identifier.length == 0) {
+        return @{};
+    }
+
+    NSString *rawMode = pick[@"pushMode"] ?: pick[@"mode"];
+    NSString *mode = [rawMode.lowercaseString isEqualToString:@"voice"] ? @"voice" : @"sms";
+
+    NSString *number = pick[@"numberWithDialCode"] ?: pick[@"obfuscatedNumber"] ?: pick[@"number"];
+    NSLog(@"[DIAG] trusted number id=%@ mode=%@ number=%@", identifier, mode, [number isKindOfClass:[NSString class]] ? number : @"-");
+
+    return @{
+        @"id": identifier,
+        @"mode": mode,
+        @"number": [number isKindOfClass:[NSString class]] ? number : @"",
+    };
+}
+
+// Walks dictionaries and arrays; any dictionary carrying a non-empty id is a
+// phone-number candidate. Nesting is traversed fully so no number is missed.
+- (void)_collectPhoneCandidates:(id)node into:(NSMutableArray *)out {
+    if ([node isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)node;
+        id rawId = dict[@"id"] ?: dict[@"phoneNumber.id"];
+        NSString *identifier = [rawId respondsToSelector:@selector(stringValue)]
+            ? [rawId stringValue]
+            : ([rawId isKindOfClass:[NSString class]] ? rawId : nil);
+        if (identifier.length > 0) {
+            [out addObject:dict];
+        }
+        for (id value in [dict allValues]) {
+            [self _collectPhoneCandidates:value into:out];
+        }
+    } else if ([node isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)node) {
+            [self _collectPhoneCandidates:item into:out];
+        }
+    }
 }
 
 // Sends the verification code. For a trusted-device prompt Apple pushes to the
