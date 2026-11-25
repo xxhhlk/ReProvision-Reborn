@@ -31,10 +31,16 @@ static NSString * const RPVGrandSlamClientInfo = @"<MacBookPro11,5> <Mac OS X;10
 static NSString * const RPVGrandSlamUserAgent = @"AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
 static NSString * const RPVGrandSlamXcodeVersion = @"14.2 (14C18)";
 
-// Set when the cached anisette must be discarded (e.g. after a code has been
-// accepted, so the follow-up login starts on a fresh attestation instead of
-// replaying the one bound to the finished 2FA session).
-static BOOL RPVAnisetteRefreshRequested = NO;
+// Anisette shared by every request. The attestation Apple accepts for one
+// session must stay identical, so the fetched headers are pinned here: GSA
+// refreshes them on its own 5 minute cycle, Developer Services keeps using the
+// copy the token was minted with.
+static NSDictionary *RPVAnisetteHeaders = nil;
+static NSDate *RPVAnisetteFetchedAt = nil;
+
+// Snapshot of the headers that minted the current token. Developer Services
+// keeps using this one even after GSA rotates its cache.
+static NSDictionary *RPVPortalAnisetteHeaders = nil;
 
 struct ccrng_state *ccDRBGGetRngState(void);
 
@@ -434,19 +440,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // X-Apple-I-MD-M value. Apple rejects that as an invalid attestation
     // (-22410 / -80046), so prefer a remote Mac anisette and only fall back to
     // the device when the server is unreachable.
-    static NSDictionary *cachedHeaders = nil;
-    static NSDate *cachedAt = nil;
     @synchronized (self) {
-        if (RPVAnisetteRefreshRequested) {
-            cachedHeaders = nil;
-            cachedAt = nil;
-            RPVAnisetteRefreshRequested = NO;
-        }
         // Cache long enough that /auth, the code send and the code verification
         // all use the same attestation. A fresh anisette mid-flow makes Apple
         // reject the verification with HTTP 401.
-        if (cachedHeaders && cachedAt && -[cachedAt timeIntervalSinceNow] < 300.0) {
-            return cachedHeaders;
+        if (RPVAnisetteHeaders && RPVAnisetteFetchedAt && -[RPVAnisetteFetchedAt timeIntervalSinceNow] < 300.0) {
+            return RPVAnisetteHeaders;
         }
     }
     NSString *storedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
@@ -475,13 +474,23 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         self.clientInfoOverride = remoteClientInfo;
     }
     NSLog(@"[DIAG] remote anisette OK rininfo=%@ mdlu=%@ client=%@", [json objectForKey:@"X-Apple-I-MD-RINFO"], [json objectForKey:@"X-Apple-I-MD-LU"] ? @"yes" : @"no", remoteClientInfo);
-    @synchronized (self) { cachedHeaders = json; cachedAt = [NSDate date]; }
+    @synchronized (self) { RPVAnisetteHeaders = json; RPVAnisetteFetchedAt = [NSDate date]; }
     return json;
 }
 
 // The anisette identity currently in use. Developer Services rejects a token
 // presented with a different identity than the one that minted it.
 - (NSDictionary *)currentAnisetteHeaders {
+    // Developer Services must present the identity that minted the token, so
+    // prefer the frozen snapshot over whatever GSA is using right now.
+    @synchronized (self) {
+        if (RPVPortalAnisetteHeaders.count > 0) {
+            return RPVPortalAnisetteHeaders;
+        }
+        if (RPVAnisetteHeaders.count > 0) {
+            return RPVAnisetteHeaders;
+        }
+    }
     return [self _anisetteData];
 }
 
@@ -1269,6 +1278,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     NSString *token = decryptedTokDict[@"t"][app][@"token"];
     RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ok tokenLen=%lu", (unsigned long)token.length]);
+    if (token.length > 0) {
+        // Freeze the identity that minted this token for Developer Services.
+        @synchronized (self) { RPVPortalAnisetteHeaders = RPVAnisetteHeaders; }
+    }
     completionHandler(nil, token);
 }
 
