@@ -373,7 +373,8 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             return cachedHeaders;
         }
     }
-    NSString *urlString = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"] ?: @"https://ani.jkcoxson.com";
+    NSString *storedURL = [[NSUserDefaults standardUserDefaults] objectForKey:@"anisetteServerURL"];
+    NSString *urlString = (storedURL && storedURL.length > 0) ? storedURL : @"https://ani.jkcoxson.com";
     NSURL *url = [NSURL URLWithString:urlString];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.timeoutInterval = 8.0;
