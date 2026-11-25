@@ -31,6 +31,11 @@ static NSString * const RPVGrandSlamClientInfo = @"<MacBookPro11,5> <Mac OS X;10
 static NSString * const RPVGrandSlamUserAgent = @"AuthKit/1 (Macintosh; OS X 26.5.2) (com.apple.dt.Xcode/26.0)";
 static NSString * const RPVGrandSlamXcodeVersion = @"14.2 (14C18)";
 
+// Set when the cached anisette must be discarded (e.g. after a code has been
+// accepted, so the follow-up login starts on a fresh attestation instead of
+// replaying the one bound to the finished 2FA session).
+static BOOL RPVAnisetteRefreshRequested = NO;
+
 struct ccrng_state *ccDRBGGetRngState(void);
 
 // On this device syslog is not running and there is no `log` tool, so NSLog
@@ -415,6 +420,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     static NSDictionary *cachedHeaders = nil;
     static NSDate *cachedAt = nil;
     @synchronized (self) {
+        if (RPVAnisetteRefreshRequested) {
+            cachedHeaders = nil;
+            cachedAt = nil;
+            RPVAnisetteRefreshRequested = NO;
+        }
         // Cache long enough that /auth, the code send and the code verification
         // all use the same attestation. A fresh anisette mid-flow makes Apple
         // reject the verification with HTTP 401.
@@ -975,6 +985,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             NSDictionary *completeResponseStatus = [completeResponse objectForKey:@"Status"];
             NSInteger completeStatusCode = [[completeResponseStatus objectForKey:@"ec"] integerValue];
             NSString *outerAuthenticationMode = [completeResponseStatus objectForKey:@"au"];
+            RPV2FAWriteLog([NSString stringWithFormat:@"login complete ec=%ld em=%@ au=%@", (long)completeStatusCode, [completeResponseStatus objectForKey:@"em"] ?: @"-", outerAuthenticationMode ?: @"-"]);
             BOOL outerResponseRequiresTwoFactor = outerAuthenticationMode.length > 0 || completeStatusCode == 409;
             if ([completeResponseStatus objectForKey:@"ec"] &&
                 completeStatusCode != 0) {
@@ -1116,6 +1127,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
                 NSString *message = [completeResponseStatus objectForKey:@"em"] ?: @"Two-factor authentication is required";
                 NSError *responseError = [self createError:message :mode];
+                RPV2FAWriteLog([NSString stringWithFormat:@"login 2FA required mode=%d", mode]);
 
                 completionHandler(responseError, altDSID, nil, idmsToken);
             } else {
@@ -1161,10 +1173,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                     // Error during request
                     NSError *responseError = [self createError:[tokensResponseStatus objectForKey:@"em"]
                                                               :[[tokensResponseStatus objectForKey:@"ec"] intValue]];
-                    
+                    RPV2FAWriteLog([NSString stringWithFormat:@"login apptokens ec=%@ em=%@", [tokensResponseStatus objectForKey:@"ec"] ?: @"-", [tokensResponseStatus objectForKey:@"em"] ?: @"-"]);
+
                     completionHandler(responseError, nil, nil, nil);
                     return;
                 }
+                RPV2FAWriteLog(@"login apptokens ok");
 
                 NSData *encryptedToken = tokensResponse[@"et"];
                 NSData *decryptedToken = decryptGCM(completeSK, encryptedToken);
@@ -1715,6 +1729,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         NSLog(@"[DIAG] 2FA submit appleCode=%ld msg=%@", (long)appleCode, appleMessage ?: @"-");
 
         if (httpCode >= 200 && httpCode < 300 && appleCode == 0) {
+            // The 2FA session is finished; drop its attestation so the follow-up
+            // login is not treated as a replay ("Your session has expired").
+            RPVAnisetteRefreshRequested = YES;
             completionHandler(nil);
             return;
         }
