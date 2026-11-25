@@ -35,6 +35,7 @@
         codeField.borderStyle = UITextBorderStyleRoundedRect;
         codeField.placeholder = @"6-digit verification code";
         codeField.keyboardType = UIKeyboardTypeNumberPad;
+        codeField.textContentType = UITextContentTypeOneTimeCode;
         codeField.textAlignment = NSTextAlignmentCenter;
         codeField.font = [UIFont monospacedDigitSystemFontOfSize:24.0 weight:UIFontWeightRegular];
         codeField.accessibilityLabel = @"Apple verification code";
