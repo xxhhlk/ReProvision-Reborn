@@ -296,6 +296,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (BOOL)_isRetryableGSAStatus:(long)httpCode;
 - (BOOL)_isRetryableNSURLError:(NSError *)error;
 - (NSURLSession *)_gsaEphemeralSession;
+- (void)_performGSADataRequest:(NSMutableURLRequest *)request attempt:(NSUInteger)attempt completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler;
 - (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (NSDictionary *)_phoneDescriptorFromAuthResponse:(NSDictionary *)response;
@@ -530,6 +531,57 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     config.timeoutIntervalForResource = 60.0;
     return [NSURLSession sessionWithConfiguration:config];
 }
+
+// Runs a single GSA request on a throwaway socket and retries transient
+// failures (network errors and 5xx). The edge drops a keep-alive connection
+// after a couple of uses and answers the next request with an HTML 503, so
+// every attempt has to start on a fresh connection.
+- (void)_performGSADataRequest:(NSMutableURLRequest *)request
+                       attempt:(NSUInteger)attempt
+                    completion:(void (^)(NSError *error, NSData *data, long httpCode))completionHandler {
+    if (!request || !request.URL) {
+        completionHandler([self createError:@"The Apple request could not be created" :RPVInternalLoginError], nil, -1);
+        return;
+    }
+
+    NSString *diagPath = request.URL.path ?: @"?";
+    NSURLSession *session = [self _gsaEphemeralSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        [session finishTasksAndInvalidate];
+
+        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+
+        void (^retry)(void) = ^{
+            NSTimeInterval delay = attempt == 0 ? 1.5 : (attempt == 1 ? 3.0 : 6.0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                           dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [self _performGSADataRequest:request attempt:attempt + 1 completion:completionHandler];
+            });
+        };
+
+        if (error) {
+            if (attempt < 3 && [self _isRetryableNSURLError:error]) {
+                NSLog(@"[DIAG] GSA %@ network error %ld, retry %lu", diagPath, (long)error.code, (unsigned long)(attempt + 1));
+                retry();
+                return;
+            }
+            completionHandler(error, nil, httpCode);
+            return;
+        }
+
+        if (attempt < 3 && [self _isRetryableGSAStatus:httpCode]) {
+            NSLog(@"[DIAG] GSA %@ HTTP=%ld retryable, retry %lu", diagPath, httpCode, (unsigned long)(attempt + 1));
+            retry();
+            return;
+        }
+
+        completionHandler(nil, data, httpCode);
+    }];
+    [task resume];
+}
+
 
 - (void)makeRequestWithParameters:(NSDictionary*)params completion:(void (^)(NSError *err, NSDictionary *response))completionHandler {
     [self _makeRequestWithParameters:params attempt:0 completion:completionHandler];
@@ -1068,11 +1120,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (void)_checkAuthEndpointWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(void (^)(NSError *error, NSDictionary *phoneDescriptor))completionHandler {
     
     NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
-    
-    NSURL *URL = self.lookupURLs ?
-        [NSURL URLWithString:[self.lookupURLs objectForKey:@"secondaryAuth"]] :
-        [NSURL URLWithString:@"https://gsa.apple.com/auth"];
-    
+
+    NSString *secondaryAuthURL = self.lookupURLs[@"secondaryAuth"];
+    NSURL *URL = secondaryAuthURL.length > 0 ? [NSURL URLWithString:secondaryAuthURL]
+                                             : [NSURL URLWithString:@"https://gsa.apple.com/auth"];
+
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     
     log_debug("Request to: %s", URL.description.UTF8String);
@@ -1102,16 +1154,17 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     }];
     
     [request setValue:self.clientInfoOverride forHTTPHeaderField:@"X-MMe-Client-Info"];
-    
-    // Do the request
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        
-        log_debug("Response code: %ld", (long)[(NSHTTPURLResponse*)response statusCode]);
-        
-        if (!data || error) {
-            log_debug("NO DATA OR ERROR");
+
+    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
+        NSLog(@"[DIAG] /auth HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+
+        if (error) {
             completionHandler(error, nil);
+            return;
+        }
+
+        if (data.length == 0) {
+            completionHandler([self createError:[NSString stringWithFormat:@"Apple returned an empty trusted number list (HTTP %ld)", httpCode] :RPVInternalLoginError], nil);
             return;
         }
 
@@ -1121,7 +1174,13 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         }
         if (![object isKindOfClass:[NSDictionary class]]) {
-            completionHandler([self createError:@"Apple returned an unreadable list of trusted numbers" :RPVInternalLoginError], nil);
+            // Apple answered with something else (typically an HTML 503 from the
+            // edge). Surface a slice of it so the cause is visible in the log.
+            NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!raw) raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            if (raw.length > 500) raw = [raw substringToIndex:500];
+            NSLog(@"[DIAG] /auth unparseable HTTP=%ld raw=%@", httpCode, raw ?: @"(non-text)");
+            completionHandler([self createError:[NSString stringWithFormat:@"Apple returned an unreadable list of trusted numbers (HTTP %ld). %@", httpCode, raw ?: @""] :RPVInternalLoginError], nil);
             return;
         }
 
@@ -1134,7 +1193,6 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         }
         completionHandler(nil, descriptor);
     }];
-    [task resume];
 }
 
 // Walk the containers Apple may nest the numbers in, then take the first entry
@@ -1223,9 +1281,9 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
         self.twoFactorPhoneNumberID = nil;
         self.twoFactorPhoneDeliveryMode = nil;
-        NSURL *URL = self.lookupURLs ?
-            [NSURL URLWithString:[self.lookupURLs objectForKey:@"trustedDeviceSecondaryAuth"]] :
-            [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/trusteddevice"];
+        NSString *trustedDeviceURL = self.lookupURLs[@"trustedDeviceSecondaryAuth"];
+        NSURL *URL = trustedDeviceURL.length > 0 ? [NSURL URLWithString:trustedDeviceURL]
+                                                : [NSURL URLWithString:@"https://gsa.apple.com/auth/verify/trusteddevice"];
 
         NSMutableURLRequest *request = [self _twoFactorRequestWithURL:URL
                                                          userIdentity:userIdentity
@@ -1312,11 +1370,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     log_debug("Request to: %s", request.URL.description.UTF8String);
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-
-        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA code request %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length);
 
         if (error) {
@@ -1338,7 +1392,6 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         completionHandler([self createError:[NSString stringWithFormat:@"Apple did not send a code (HTTP %ld). %@", httpCode, raw ?: @""]
                                            :RPVInternalLoginError]);
     }];
-    [task resume];
 }
 
 - (void)submitTwoFactorCode:(NSString*)code withUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(RPVTwoFactorResultBlock)completionHandler {
@@ -1364,13 +1417,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     // Parse the real dsid out of the identity
     NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
     
-    NSURL *URL = nil;
-    if (self.lookupURLs) {
-        URL = [NSURL URLWithString:[self.lookupURLs objectForKey:@"validateCode"]];
-    } else {
-        URL = [NSURL URLWithString:@"https://gsa.apple.com/grandslam/GsService2/validate"];
-    }
-    
+    NSString *validateCodeURL = self.lookupURLs[@"validateCode"];
+    NSURL *URL = validateCodeURL.length > 0 ? [NSURL URLWithString:validateCodeURL]
+                                            : [NSURL URLWithString:@"https://gsa.apple.com/grandslam/GsService2/validate"];
+
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
     
     log_debug("Request to: %s", URL.description.UTF8String);
@@ -1404,43 +1454,41 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     
     log_debug("Request Headers: %s", httpHeaders.description.UTF8String);
     
-    // Do the request
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        
+    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
+        NSLog(@"[DIAG] validate HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+
         if (!data || error) {
             completionHandler(error);
+            return;
+        }
+
+        // Parse the response
+        NSError *parseError;
+        NSDictionary *responseDictionary = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:&parseError];
+
+        // Handle parse issues
+        if (!responseDictionary) {
+            NSError *error = [self createError:parseError.localizedDescription :RPVInternalLoginError];
+            completionHandler(error);
+            return;
+        }
+
+        log_debug("Request Reponse: %s", responseDictionary.description.UTF8String);
+
+        NSInteger errorCode = [responseDictionary[@"ec"] integerValue]; // Same for NSString or NSNumber.
+        if (errorCode == 0) {
+            // Success! However, still need to re-login again
+            completionHandler(nil);
+        } else if (errorCode == -21669) {
+            NSError *error = [self createError:@"Incorrect 2FA code" :RPVInternalLoginIncorrect2FACodeError];
+            completionHandler(error);
         } else {
-            
-            // Parse the response
-            NSError *parseError;
-            NSDictionary *responseDictionary = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:&parseError];
-            
-            // Handle parse issues
-            if (!responseDictionary) {
-                NSError *error = [self createError:parseError.localizedDescription :RPVInternalLoginError];
-                completionHandler(error);
-                return;
-            }
-            
-            log_debug("Request Reponse: %s", responseDictionary.description.UTF8String);
-            
-            NSInteger errorCode = [responseDictionary[@"ec"] integerValue]; // Same for NSString or NSNumber.
-            if (errorCode == 0) {
-                // Success! However, still need to re-login again
-                completionHandler(nil);
-            } else if (errorCode == -21669) {
-                NSError *error = [self createError:@"Incorrect 2FA code" :RPVInternalLoginIncorrect2FACodeError];
-                completionHandler(error);
-            } else {
-                NSError *responseError = [self createError:[responseDictionary objectForKey:@"em"]
-                                                          :[[responseDictionary objectForKey:@"ec"] intValue]];
-                
-                completionHandler(responseError);
-            }
+            NSError *responseError = [self createError:[responseDictionary objectForKey:@"em"]
+                                                      :[[responseDictionary objectForKey:@"ec"] intValue]];
+
+            completionHandler(responseError);
         }
     }];
-    [task resume];
 }
 
 // Validates a code that Apple delivered to the trusted phone number.
@@ -1463,11 +1511,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     NSLog(@"[DIAG] 2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode);
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-        completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-
-        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        long httpCode = httpResp ? (long)httpResp.statusCode : -1;
+    [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
 
         if (error) {
