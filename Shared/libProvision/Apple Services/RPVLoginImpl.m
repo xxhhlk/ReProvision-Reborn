@@ -333,6 +333,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
 - (NSDictionary *)_phoneDescriptorFromAuthResponse:(id)response;
 - (void)_collectPhoneCandidates:(id)node into:(NSMutableArray *)out;
+- (BOOL)_scanErrorNode:(id)node code:(NSInteger *)code message:(NSString **)message;
 - (NSMutableURLRequest *)_twoFactorRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
 - (NSMutableURLRequest *)_twoFactorJSONRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
 - (void)_performTwoFactorCodeRequest:(NSMutableURLRequest *)request completion:(void (^)(NSError *error))completionHandler;
@@ -556,8 +557,13 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (NSURLSession *)_gsaEphemeralSession {
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     config.URLCache = nil;
-    config.HTTPCookieStorage = nil;
-    config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
+    // Keep cookies across throwaway sessions: the trusted-phone flow sends a
+    // code on one request and verifies it on the next, and Apple ties the two
+    // together with a session cookie. Dropping it makes a correct code look
+    // wrong. The socket is still fresh per session, so the 503 reuse problem is
+    // unaffected.
+    config.HTTPCookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyAlways;
     config.HTTPShouldUsePipelining = NO;
     config.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
     config.timeoutIntervalForRequest = 30.0;
@@ -1315,6 +1321,51 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     }
 }
 
+// Finds Apple's error code/message anywhere in a response body. Prefers
+// service_errors entries, then ec/code with em/message.
+- (BOOL)_scanErrorNode:(id)node code:(NSInteger *)code message:(NSString **)message {
+    if ([node isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)node) {
+            if ([self _scanErrorNode:item code:code message:message]) {
+                return YES;
+            }
+        }
+        return NO;
+    }
+    if (![node isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+
+    NSDictionary *dict = (NSDictionary *)node;
+    id serviceErrors = dict[@"service_errors"] ?: dict[@"serviceErrors"];
+    if ([serviceErrors isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)serviceErrors) {
+            if ([self _scanErrorNode:item code:code message:message]) {
+                return YES;
+            }
+        }
+    }
+
+    id rawCode = dict[@"ec"] ?: dict[@"code"];
+    if ([rawCode respondsToSelector:@selector(integerValue)] && [rawCode integerValue] != 0) {
+        *code = [rawCode integerValue];
+        id rawMessage = dict[@"em"] ?: dict[@"message"] ?: dict[@"userString"] ?: dict[@"title"];
+        if ([rawMessage isKindOfClass:[NSString class]] && [rawMessage length] > 0) {
+            *message = rawMessage;
+        }
+        return YES;
+    }
+
+    for (id value in [dict allValues]) {
+        if ([value isKindOfClass:[NSDictionary class]] || [value isKindOfClass:[NSArray class]]) {
+            if ([self _scanErrorNode:value code:code message:message]) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 // Sends the verification code. For a trusted-device prompt Apple pushes to the
 // device; for a phone number the caller picks sms or voice. The number has to
 // be listed first, because the request body must carry its id.
@@ -1434,6 +1485,7 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
     [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA code request %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length);
+        RPV2FAWriteLog([NSString stringWithFormat:@"2FA send %@ HTTP=%ld bytes=%lu", request.URL.path, httpCode, (unsigned long)data.length]);
 
         if (error) {
             completionHandler(error);
@@ -1572,33 +1624,48 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     } options:0 error:nil];
 
     NSLog(@"[DIAG] 2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode);
+    RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit id=%@ mode=%@", self.twoFactorPhoneNumberID, self.twoFactorPhoneDeliveryMode]);
 
     [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] 2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+        RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length]);
 
         if (error) {
+            RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit transport error=%@", error.localizedDescription ?: @"?"]);
             completionHandler(error);
             return;
         }
 
-        if (httpCode >= 200 && httpCode < 300) {
+        // Parse whatever Apple sent so the real reason is reported, not a blanket
+        // "incorrect code". Only -21669 actually means the code was wrong.
+        id body = [NSPropertyListSerialization propertyListWithData:data options:0 format:nil error:nil];
+        if (![body isKindOfClass:[NSDictionary class]] && ![body isKindOfClass:[NSArray class]]) {
+            body = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        }
+        NSInteger appleCode = 0;
+        NSString *appleMessage = nil;
+        [self _scanErrorNode:body code:&appleCode message:&appleMessage];
+
+        NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!raw) raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+        if (raw.length > 800) raw = [raw substringToIndex:800];
+        RPV2FAWriteLog([NSString stringWithFormat:@"2FA submit appleCode=%ld msg=%@ raw=%@", (long)appleCode, appleMessage ?: @"-", raw ?: @"(non-text)"]);
+        NSLog(@"[DIAG] 2FA submit appleCode=%ld msg=%@", (long)appleCode, appleMessage ?: @"-");
+
+        if (httpCode >= 200 && httpCode < 300 && appleCode == 0) {
             completionHandler(nil);
             return;
         }
 
-        NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (raw.length > 300) {
-            raw = [raw substringToIndex:300];
-        }
-        NSLog(@"[DIAG] 2FA submit failed raw=%@", raw);
-
-        if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
-            completionHandler([self createError:@"Apple did not accept that verification code. Request a new code and try again."
-                                               :RPVInternalLoginIncorrect2FACodeError]);
+        if (appleCode == -21669) {
+            completionHandler([self createError:@"Incorrect 2FA code" :RPVInternalLoginIncorrect2FACodeError]);
             return;
         }
-        completionHandler([self createError:[NSString stringWithFormat:@"Apple could not verify that code (HTTP %ld).", httpCode]
-                                           :RPVInternalLoginError]);
+
+        NSString *message = appleMessage.length > 0 ? appleMessage
+            : [NSString stringWithFormat:@"Apple could not verify that code (HTTP %ld%@).", httpCode,
+               appleCode != 0 ? [NSString stringWithFormat:@" / %ld", (long)appleCode] : @""];
+        completionHandler([self createError:message :(int)(appleCode ?: httpCode)]);
     }];
 }
 
