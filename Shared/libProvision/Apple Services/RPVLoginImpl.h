@@ -8,9 +8,17 @@
 
 #import <Foundation/Foundation.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// Appends a line to /var/mobile/Documents/ReProvision-2FA.log. Best effort:
 /// the device has no syslog, so this is the only way to see what Apple said.
 void RPV2FAWriteLog(NSString *message);
+
+#ifdef __cplusplus
+}
+#endif
 
 // Error definitions
 #define RPVInternalLoginError 5000
