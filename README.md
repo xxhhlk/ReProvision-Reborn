@@ -20,6 +20,22 @@ See [MAINTENANCE.md](MAINTENANCE.md) for the current maintenance scope and triag
 
 Battery optimisations are also in place through the usage of a background daemon to handle automatic signing.
 
+### What this fork changes
+
+This fork carries a set of Apple ID sign-in fixes that upstream does not have. Sign-in is the part that broke once Apple started refusing older anisette attestations, so most of the work went there.
+
+- **2FA happens inside the app.** The code is typed into a field in ReProvision instead of being collected in Settings and handed back through a URL, and the field is marked as a one-time code so the keyboard offers the SMS code.
+- **SMS or voice, to a phone number you pick.** Trusted numbers are listed as Apple returns them, with the delivery mode chosen per number.
+- **Remote Mac anisette on every iOS version.** Upstream only uses it on iOS 17+ and leaves older jailbreaks on the device's own AKD. AKD cannot reach its ADI keys on these jailbreaks, so every request carries the same `X-Apple-I-MD-M` and Apple answers -22410 / -80046.
+- **One ADI identity that survives a relaunch.** The anisette server provisions an `adi_pb` once and the device keeps it, so the identity Apple sees stays fixed while the one-shot attestation stays fresh. Relaunching no longer invalidates the saved token (the portal's resultCode 1100) and no longer asks for the password and a 2FA code again. The older endpoints that hand out a throwaway Mac per request are what made this unavoidable before, and the ones reporting old ADI routing info were rejected with -36607.
+- **The 2FA exchange holds together.** `/auth`, `verify/phone` and `verify/phone/securitycode` use JSON content negotiation, the whole exchange shares one session so the cookies tie the steps together, and a code is only reported as wrong when Apple returns -21669 instead of treating any 400 that way.
+- **The token is presented by the identity that earned it.** Developer Services requests use the same anisette identity that minted the GS token; a mismatch is what made the portal answer 1100 and drop the session.
+- **Sign-in diagnostics go to a file.** `/var/mobile/Documents/ReProvision-2FA.log` records the GSA steps, attestation fingerprints and portal result codes. iOS 13 here has no syslogd and no `log` tool, so there was nowhere else to look.
+- **The anisette server is a picker, not a text field.** Four known v3 servers are listed under Settings → Advanced. They all speak the same protocol, and the device keeps its own ADI identity, so switching one only costs you a fresh sign-in.
+- **Firebase is gone**, and the deb now packages on macOS 10.15.
+
+Sign-in and re-signing were verified end to end on iOS 13.4.1.
+
 ## URL scheme
 ReProvision Reborn supports URL scheme.
 
