@@ -17,6 +17,8 @@
 @property (nonatomic, strong) NSArray *_interimTeamIDArray;
 @property (nonatomic, strong) NSURLCredential *credentials;
 @property (nonatomic) NSDate *lastFallbackTriggerTime;
+@property (nonatomic) BOOL hasStartedAuthentication;
+@property (nonatomic) BOOL isAuthenticating;
 
 @end
 
@@ -61,6 +63,12 @@
         return;
     }
 
+    // A login is already running; starting another would clear the credentials
+    // it depends on.
+    if (self.isAuthenticating) {
+        return;
+    }
+
     // Deduplicate against the viewWillAppear trigger to avoid firing the
     // request twice in quick succession.
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -87,8 +95,15 @@
     
     [self.navigationItem setRightBarButtonItem:[[UIBarButtonItem alloc] initWithCustomView:spinner]];
     
-    // Redirect user to Settings
-    [self didTapFallbackButton:nil];
+    // Redirect user to Settings, but only once. Each call starts a fresh SRP
+    // login that clears the cached 2FA credentials, so re-entering this screen
+    // (or returning from Settings) must not start another one: concurrent
+    // logins overwrite each other's cache and the follow-up login then runs
+    // with an empty username.
+    if (!self.hasStartedAuthentication) {
+        self.hasStartedAuthentication = YES;
+        [self didTapFallbackButton:nil];
+    }
 }
 
 - (void)didReceiveMemoryWarning {
@@ -112,8 +127,17 @@
 
 - (IBAction)didTapFallbackButton:(id)sender {
     
+    // Only one authentication may be in flight: a second one would clear the
+    // cached 2FA credentials the first one needs.
+    if (self.isAuthenticating) {
+        return;
+    }
+    self.isAuthenticating = YES;
+
     [[RPVAccountChecker sharedInstance] request2FAFallbackWithCompletionHandler:^(NSString *failureReason, NSString *resultCode, NSArray *teamIDArray, NSURLCredential *credential) {
         
+        self.isAuthenticating = NO;
+
         if (teamIDArray) {
             // Present the Team ID controller if necessary!
             dispatch_async(dispatch_get_main_queue(), ^{

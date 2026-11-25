@@ -192,6 +192,18 @@
 
     NSString *username = [self.cachedUserIdentityFor2FA componentsSeparatedByString:@"|"].lastObject;
     NSString *password = [self.cachedUserPasswordFor2FA copy];
+    NSLog(@"[DIAG] fallback2FA enter identity=%@ pwdLen=%lu hasSession=%d",
+          self.cachedUserIdentityFor2FA, (unsigned long)password.length, [self hasActiveTwoFactorSession]);
+
+    // Without the cached credentials there is nothing to re-authenticate with;
+    // report it instead of running a login with an empty username.
+    if (username.length == 0 || password.length == 0) {
+        NSError *missing = [NSError errorWithDomain:NSCocoaErrorDomain
+                                              code:RPVInternalLoginError
+                                          userInfo:@{NSLocalizedDescriptionKey: @"The Apple authentication session is incomplete. Please go back and sign in again."}];
+        completionHandler(missing, nil, nil);
+        return;
+    }
 
     // AuthKit only completes the on-device 2FA step; the token it returns is
     // scoped to com.apple.gs.appleid.auth, which Developer Services rejects.
@@ -199,6 +211,7 @@
     // com.apple.gs.xcode.auth token. authenticateWithUsername: clears the
     // cached 2FA session, so the become-active guard will not re-trigger.
     [self.fallbackImpl loginWithUsername:username password:password completion:^(NSError *error, NSString *userIdentity, NSString *gsToken) {
+        NSLog(@"[DIAG] fallback2FA authkit done err=%@", error.localizedDescription ?: @"none");
         if (!error) {
             [self authenticateWithUsername:username password:password withCompletion:completionHandler];
         } else {
