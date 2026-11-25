@@ -16,9 +16,9 @@
 @property (nonatomic, strong) NSString *emailAddress;
 @property (nonatomic, strong) NSArray *_interimTeamIDArray;
 @property (nonatomic, strong) NSURLCredential *credentials;
-@property (nonatomic) NSDate *lastFallbackTriggerTime;
-@property (nonatomic) BOOL hasStartedAuthentication;
-@property (nonatomic) BOOL isAuthenticating;
+@property (nonatomic) BOOL requestedCode;
+@property (nonatomic) BOOL authenticationInProgress;
+@property (nonatomic, strong) UIButton *requestCodeButton;
 
 @end
 
@@ -26,12 +26,49 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // Do any additional setup after loading the view.
-    
-    [self.passwordTextField addTarget:self action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
-    
-    // Handle colour
-    
+
+    // The storyboard has no code field, so add one under the subtitle.
+    if (!self.passwordTextField) {
+        UITextField *codeField = [[UITextField alloc] initWithFrame:CGRectZero];
+        codeField.translatesAutoresizingMaskIntoConstraints = NO;
+        codeField.borderStyle = UITextBorderStyleRoundedRect;
+        codeField.placeholder = @"6-digit verification code";
+        codeField.keyboardType = UIKeyboardTypeNumberPad;
+        codeField.textAlignment = NSTextAlignmentCenter;
+        codeField.font = [UIFont monospacedDigitSystemFontOfSize:24.0 weight:UIFontWeightRegular];
+        codeField.accessibilityLabel = @"Apple verification code";
+
+        [self.view addSubview:codeField];
+        [NSLayoutConstraint activateConstraints:@[
+            [codeField.topAnchor constraintEqualToAnchor:self.subtitleLabel.bottomAnchor constant:28.0],
+            [codeField.leadingAnchor constraintEqualToAnchor:self.view.layoutMarginsGuide.leadingAnchor],
+            [codeField.trailingAnchor constraintEqualToAnchor:self.view.layoutMarginsGuide.trailingAnchor],
+            [codeField.heightAnchor constraintEqualToConstant:52.0],
+        ]];
+        self.passwordTextField = codeField;
+    }
+
+    // Repurpose the Settings redirect button into a resend action.
+    for (UIView *subview in self.view.subviews) {
+        if (![subview isKindOfClass:[UIButton class]]) {
+            continue;
+        }
+        UIButton *button = (UIButton *)subview;
+        if ([[button titleForState:UIControlStateNormal] isEqualToString:@"Continue Authentication"]) {
+            self.requestCodeButton = button;
+            [button setTitle:@"Send New Code" forState:UIControlStateNormal];
+            break;
+        }
+    }
+
+    [self.passwordTextField addTarget:self
+                               action:@selector(textFieldDidChange:)
+                     forControlEvents:UIControlEventEditingChanged];
+
+    self.titleLabel.text = @"2-Factor Authentication";
+    self.subtitleLabel.text = @"Enter the six-digit code Apple sent for this Apple ID.";
+    self.confirmBarButtonItem.enabled = NO;
+
     if (@available(iOS 13.0, *)) {
         self.view.backgroundColor = [UIColor systemBackgroundColor];
         self.titleLabel.textColor = [UIColor labelColor];
@@ -41,74 +78,25 @@
         self.titleLabel.textColor = [UIColor blackColor];
         self.subtitleLabel.textColor = [UIColor blackColor];
     }
-
-    // AuthKit opens the Settings app to complete 2FA and does not return
-    // automatically. Listen for the app becoming active again so the
-    // authentication flow can resume when the user switches back.
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                               selector:@selector(applicationDidBecomeActive:)
-                                                   name:UIApplicationDidBecomeActiveNotification
-                                                 object:nil];
-}
-
-- (void)dealloc {
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
-
-- (void)applicationDidBecomeActive:(NSNotification *)notification {
-    // Only re-trigger when the 2FA session is still intact. After a successful
-    // fallback login the cached credentials are cleared; re-running then would
-    // make AuthKit prompt for an empty username and loop forever.
-    if (![[RPVAccountChecker sharedInstance] hasActiveTwoFactorSession]) {
-        return;
-    }
-
-    // A login is already running; starting another would clear the credentials
-    // it depends on.
-    if (self.isAuthenticating) {
-        return;
-    }
-
-    // Deduplicate against the viewWillAppear trigger to avoid firing the
-    // request twice in quick succession.
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (self.lastFallbackTriggerTime && (now - [self.lastFallbackTriggerTime timeIntervalSince1970]) < 1.0) {
-        return;
-    }
-    self.lastFallbackTriggerTime = [NSDate date];
-    [self didTapFallbackButton:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    
+
     [self.navigationController.navigationBar setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
     [self.navigationController.navigationBar setShadowImage:[UIImage new]];
-    
-    // Set right bar item to a spinning wheel
-    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
-    spinner.hidesWhenStopped = YES;
-    if (@available(iOS 13.0, *)) {
-        spinner.color = [UIColor labelColor];
-    }
-    [spinner startAnimating];
-    
-    [self.navigationItem setRightBarButtonItem:[[UIBarButtonItem alloc] initWithCustomView:spinner]];
-    
-    // Redirect user to Settings, but only once. Each call starts a fresh SRP
-    // login that clears the cached 2FA credentials, so re-entering this screen
-    // (or returning from Settings) must not start another one: concurrent
-    // logins overwrite each other's cache and the follow-up login then runs
-    // with an empty username.
-    if (!self.hasStartedAuthentication) {
-        self.hasStartedAuthentication = YES;
-        [self didTapFallbackButton:nil];
+
+    // Request one code for this screen. The code is validated against the same
+    // SRP session that asked for it; sending the user to Settings would let
+    // AuthKit authenticate a different anisette identity and Apple would ask
+    // for 2FA again on the follow-up login.
+    if (!self.requestedCode && !self.authenticationInProgress) {
+        [self requestVerificationCode];
     }
 }
 
 - (void)didReceiveMemoryWarning {
     [super didReceiveMemoryWarning];
-    // Dispose of any resources that can be recreated.
 }
 
 - (void)presentTeamIDViewControllerIfNecessaryWithTeamIDs:(NSArray*)teamids credentials:(NSURLCredential*)credential {
@@ -125,34 +113,104 @@
     [self performSegueWithIdentifier:@"presentFinalController" sender:nil];
 }
 
-- (IBAction)didTapFallbackButton:(id)sender {
-    
-    // Only one authentication may be in flight: a second one would clear the
-    // cached 2FA credentials the first one needs.
-    if (self.isAuthenticating) {
+- (void)showNavigationSpinner {
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleGray];
+    spinner.hidesWhenStopped = YES;
+    if (@available(iOS 13.0, *)) {
+        spinner.color = [UIColor labelColor];
+    }
+    [spinner startAnimating];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithCustomView:spinner];
+}
+
+- (void)restoreNavigationButton {
+    self.navigationItem.rightBarButtonItem = self.confirmBarButtonItem;
+    [self textFieldDidChange:self.passwordTextField];
+}
+
+- (void)requestVerificationCode {
+    if (self.authenticationInProgress) {
         return;
     }
-    self.isAuthenticating = YES;
 
-    [[RPVAccountChecker sharedInstance] request2FAFallbackWithCompletionHandler:^(NSString *failureReason, NSString *resultCode, NSArray *teamIDArray, NSURLCredential *credential) {
-        
-        self.isAuthenticating = NO;
+    if (![[RPVAccountChecker sharedInstance] hasActiveTwoFactorSession]) {
+        self.requestCodeButton.enabled = NO;
+        [self changeUIToIncorrectStatus:@"This verification session has finished. Go back and sign in again."];
+        return;
+    }
 
-        if (teamIDArray) {
-            // Present the Team ID controller if necessary!
-            dispatch_async(dispatch_get_main_queue(), ^{
+    self.authenticationInProgress = YES;
+    self.passwordTextField.text = @"";
+    self.requestCodeButton.enabled = NO;
+    self.confirmBarButtonItem.enabled = NO;
+    [self showNavigationSpinner];
+
+    [[RPVAccountChecker sharedInstance] requestLoginCodeWithCompletionHandler:^(NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.authenticationInProgress = NO;
+            self.requestCodeButton.enabled = YES;
+            [self restoreNavigationButton];
+
+            if (error) {
+                self.requestedCode = NO;
+                NSString *message = error.localizedDescription.length > 0
+                    ? error.localizedDescription
+                    : @"Could not request a verification code. Please try again.";
+                [self changeUIToIncorrectStatus:message];
+                return;
+            }
+
+            self.requestedCode = YES;
+            self.subtitleLabel.text = @"Enter the newest six-digit code Apple sent. Requesting another code invalidates older ones.";
+            [self.passwordTextField becomeFirstResponder];
+        });
+    }];
+}
+
+- (IBAction)didTapFallbackButton:(id)sender {
+    [self requestVerificationCode];
+}
+
+- (IBAction)didTapConfirmButton:(id)sender {
+    if (self.authenticationInProgress || self.passwordTextField.text.length != 6) {
+        return;
+    }
+
+    NSString *code = [self.passwordTextField.text copy];
+    self.authenticationInProgress = YES;
+    self.passwordTextField.enabled = NO;
+    self.requestCodeButton.enabled = NO;
+    self.confirmBarButtonItem.enabled = NO;
+    [self showNavigationSpinner];
+
+    [[RPVAccountChecker sharedInstance] validateLoginCode:code withCompletionHandler:^(NSString *failureReason, NSString *resultCode, NSArray *teamIDArray, NSURLCredential *credential) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL hasActiveSession = [[RPVAccountChecker sharedInstance] hasActiveTwoFactorSession];
+            self.authenticationInProgress = NO;
+            self.passwordTextField.enabled = YES;
+            self.requestCodeButton.enabled = hasActiveSession;
+            [self restoreNavigationButton];
+
+            if (teamIDArray.count > 0 && credential) {
                 [self presentTeamIDViewControllerIfNecessaryWithTeamIDs:teamIDArray credentials:credential];
-            });
-        } else {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self changeUIToIncorrectStatus:failureReason];
-            });
-        }
+                return;
+            }
+
+            NSString *message = failureReason.length > 0
+                ? failureReason
+                : @"Apple did not accept that verification code. Request a new code and try again.";
+            [self changeUIToIncorrectStatus:message];
+        });
     }];
 }
 
 - (void)changeUIToIncorrectStatus:(NSString*)statusString {
-    self.subtitleLabel.text = @"Tap 'Continue Authentication' below to redirect to Settings";
+    self.subtitleLabel.text = statusString.length > 0
+        ? statusString
+        : @"Authentication could not be completed. Please try again.";
+
+    self.passwordTextField.text = @"";
+    self.confirmBarButtonItem.enabled = NO;
 }
 
 - (void)setupWithEmailAddress:(NSString*)emailAddress {
@@ -164,33 +222,35 @@
 ////////////////////////////////////////////////////////
 
 - (void)textFieldDidChange:(id)sender {
-    if (self.passwordTextField.text.length > 0) {
-        self.confirmBarButtonItem.enabled = YES;
-    } else {
-        self.confirmBarButtonItem.enabled = NO;
+    NSString *text = self.passwordTextField.text ?: @"";
+    NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+    NSString *digits = [[text componentsSeparatedByCharactersInSet:nonDigits] componentsJoinedByString:@""];
+    if (digits.length > 6) {
+        digits = [digits substringToIndex:6];
     }
-}
+    if (![digits isEqualToString:text]) {
+        self.passwordTextField.text = digits;
+    }
 
+    self.confirmBarButtonItem.enabled = digits.length == 6 &&
+        !self.authenticationInProgress &&
+        [[RPVAccountChecker sharedInstance] hasActiveTwoFactorSession];
+}
 
 #pragma mark - Navigation
 
-// In a storyboard-based application, you will often want to do a little preparation before navigation
 - (void)prepareForSegue:(UIStoryboardSegue *)segue sender:(id)sender {
     if ([[[segue destinationViewController] class] isEqual:[RPVAccountTeamIDViewController class]]) {
-        // If Team ID controller, pass through the interim team ID array.
         RPVAccountTeamIDViewController *teamidController = (RPVAccountTeamIDViewController*)[segue destinationViewController];
-        
-        [teamidController setupWithDataSource:self._interimTeamIDArray username:self.emailAddress andPassword:self.passwordTextField.text];
+        [teamidController setupWithDataSource:self._interimTeamIDArray
+                                     username:self.credentials.user
+                                  andPassword:self.credentials.password];
     } else if ([[[segue destinationViewController] class] isEqual:[RPVAccountFinalController class]]) {
-        // or if the final controller, send everything through!
-        
         NSString *teamID = [[self._interimTeamIDArray firstObject] objectForKey:@"teamId"];
-        NSString *username = self.credentials.user;
-        NSString *password = self.credentials.password;
-        
         RPVAccountFinalController *finalController = (RPVAccountFinalController*)[segue destinationViewController];
-        
-        [finalController setupWithUsername:username password:password andTeamID:teamID];
+        [finalController setupWithUsername:self.credentials.user
+                                  password:self.credentials.password
+                                andTeamID:teamID];
     }
 }
 
