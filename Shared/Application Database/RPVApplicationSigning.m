@@ -322,7 +322,11 @@ static RPVApplicationSigning *sharedInstance;
             } else if ([errorMessage containsString:@"valid provisioning profile"]) {
                 errorMessage = @"This application hasn't been signed correctly for this device. This may occur if this device is not registered to the account used to sign with - try logging out then in again";
             } else if (error.code == 13) {
-                errorMessage = @"This app could not be installed because there already are 3 signed apps installed. Automatic resigning needs at maximum 2 apps installed via your account.";
+                // This counts provisioning profiles, not installed apps, and a
+                // re-sign adds one. A profile left behind by an app whose app id
+                // did not match its bundle id keeps holding a slot: iOS never
+                // associated it with the app, so uninstalling did not remove it.
+                errorMessage = @"A free Apple ID allows 3 provisioning profiles per team on this device, and re-signing adds a new one. If fewer than 3 signed apps are installed, an orphaned profile is probably holding a slot - check /var/MobileDevice/ProvisioningProfiles/ for a profile whose app id matches no installed app.";
             } else {
                 // Parse out the useful information from the error description
                 NSRange range = [error.localizedDescription rangeOfString:@"(" options:NSBackwardsSearch];
