@@ -33,6 +33,38 @@ static NSString * const RPVGrandSlamXcodeVersion = @"14.2 (14C18)";
 
 struct ccrng_state *ccDRBGGetRngState(void);
 
+// On this device syslog is not running and there is no `log` tool, so NSLog
+// never reaches a file. Mirror the 2FA diagnostics into a file the operator can
+// read over SSH. Kept small and best-effort; never throws.
+static void RPV2FAWriteLog(NSString *message) {
+    if (message.length == 0) {
+        return;
+    }
+    @try {
+        NSString *path = @"/var/mobile/Documents/ReProvision-2FA.log";
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], message];
+        NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+      withIntermediateDirectories:YES attributes:nil error:nil];
+        if ([fm fileExistsAtPath:path]) {
+            NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+            if ([[attrs objectForKey:NSFileSize] unsignedLongLongValue] > 512 * 1024) {
+                [fm removeItemAtPath:path error:nil];
+            }
+        }
+        if ([fm fileExistsAtPath:path]) {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            [fh seekToEndOfFile];
+            [fh writeData:data];
+            [fh closeFile];
+        } else {
+            [data writeToFile:path atomically:YES];
+        }
+    } @catch (__unused NSException *exception) {
+    }
+}
+
 @interface AKAppleIDSession : NSObject
 - (AKAppleIDSession *)initWithIdentifier:(NSString *)identifier;
 - (NSDictionary *)appleIDHeadersForRequest:(NSURLRequest *)request;
@@ -1119,45 +1151,27 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 // Apple lists the trusted phone numbers for the account at /auth. Read the
 // first one together with its delivery mode so a code can be sent to it.
 - (void)_checkAuthEndpointWithUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(void (^)(NSError *error, NSDictionary *phoneDescriptor))completionHandler {
-    
-    NSString *dsid = [userIdentity componentsSeparatedByString:@"|"].firstObject;
 
     NSString *secondaryAuthURL = self.lookupURLs[@"secondaryAuth"];
     NSURL *URL = secondaryAuthURL.length > 0 ? [NSURL URLWithString:secondaryAuthURL]
                                              : [NSURL URLWithString:@"https://gsa.apple.com/auth"];
 
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL];
-    
+    // The trusted-phone endpoints negotiate JSON, not plist. Asking for
+    // text/x-xml-plist makes Apple answer 200 with a body that is not a plist,
+    // which then reads as an "unreadable" number list.
+    NSMutableURLRequest *request = [self _twoFactorJSONRequestWithURL:URL
+                                                         userIdentity:userIdentity
+                                                            idmsToken:token];
+    if (!request) {
+        completionHandler([self createError:@"The Apple authentication session is incomplete" :RPVInternalLoginError], nil);
+        return;
+    }
+
     log_debug("Request to: %s", URL.description.UTF8String);
-    
-    NSString *identityToken = [NSString stringWithFormat:@"%@:%@", dsid, token];
-    
-    NSData *identityTokenData = [identityToken dataUsingEncoding:NSUTF8StringEncoding];
-    NSString *encodedIdentityToken = [identityTokenData base64EncodedStringWithOptions:0];
-    
-    // Sort out headers
-    NSMutableDictionary<NSString *, NSString *> *httpHeaders = [@{
-        @"Content-Type": @"text/x-xml-plist",
-        @"User-Agent": RPVGrandSlamUserAgent,
-        @"Accept": @"text/x-xml-plist",
-        @"Accept-Language": @"en-us",
-        @"X-Apple-Client-App-Name": @"Xcode",
-        @"X-Apple-App-Info": @"com.apple.gs.xcode.auth",
-        @"X-Xcode-Version": RPVGrandSlamXcodeVersion,
-        @"X-Apple-Identity-Token": encodedIdentityToken,
-    } mutableCopy];
-    
-    [httpHeaders addEntriesFromDictionary:[self _anisetteData]];
-    [httpHeaders addEntriesFromDictionary:[self _deviceData]];
-    
-    [httpHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
-        [request setValue:value forHTTPHeaderField:key];
-    }];
-    
-    [request setValue:self.clientInfoOverride forHTTPHeaderField:@"X-MMe-Client-Info"];
 
     [self _performGSADataRequest:request attempt:0 completion:^(NSError *error, NSData *data, long httpCode) {
         NSLog(@"[DIAG] /auth HTTP=%ld bytes=%lu", httpCode, (unsigned long)data.length);
+        RPV2FAWriteLog([NSString stringWithFormat:@"/auth HTTP=%ld bytes=%lu err=%@", httpCode, (unsigned long)data.length, error.localizedDescription ?: @"none"]);
 
         if (error) {
             completionHandler(error, nil);
@@ -1181,6 +1195,8 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             // a slice of it so the cause is visible in the log.
             NSString *raw = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             if (!raw) raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            NSString *rawFull = raw.length > 2000 ? [raw substringToIndex:2000] : raw;
+            RPV2FAWriteLog([NSString stringWithFormat:@"/auth unparseable HTTP=%ld raw=%@", httpCode, rawFull ?: @"(non-text)"]);
             if (raw.length > 500) raw = [raw substringToIndex:500];
             NSLog(@"[DIAG] /auth unparseable HTTP=%ld raw=%@", httpCode, raw ?: @"(non-text)");
             completionHandler([self createError:[NSString stringWithFormat:@"Apple returned an unreadable list of trusted numbers (HTTP %ld). %@", httpCode, raw ?: @""] :RPVInternalLoginError], nil);
@@ -1190,18 +1206,41 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 
         log_debug("Reponse: %s", ((NSObject *)object).description.UTF8String);
 
+        // Even with HTTP 200 Apple may answer with an error payload (ec/code or
+        // Status.ec). Surface its message instead of pretending the list is empty.
+        if ([object isKindOfClass:[NSDictionary class]]) {
+            NSDictionary *dict = (NSDictionary *)object;
+            NSDictionary *status = [dict[@"Status"] isKindOfClass:[NSDictionary class]] ? dict[@"Status"] : nil;
+            id rawCode = dict[@"ec"] ?: dict[@"code"] ?: status[@"ec"];
+            NSInteger code = [rawCode respondsToSelector:@selector(integerValue)] ? [rawCode integerValue] : 0;
+            if (code != 0) {
+                NSString *message = dict[@"em"] ?: dict[@"message"];
+                if (![message isKindOfClass:[NSString class]] || message.length == 0) {
+                    message = [NSString stringWithFormat:@"Apple rejected the request (code %ld)", (long)code];
+                }
+                NSLog(@"[DIAG] /auth error code=%ld message=%@", (long)code, message);
+                RPV2FAWriteLog([NSString stringWithFormat:@"/auth error code=%ld message=%@", (long)code, message]);
+                completionHandler([self createError:message :(int)code], nil);
+                return;
+            }
+        }
+
         NSDictionary *descriptor = [self _phoneDescriptorFromAuthResponse:object];
         if (descriptor.count == 0) {
             // No number found: dump the top-level keys (or first elements) so the
             // actual structure is visible when a real number list is expected.
             if ([object isKindOfClass:[NSDictionary class]]) {
-                NSLog(@"[DIAG] /auth no number, keys=%@", [[object allKeys] sortedArrayUsingSelector:@selector(compare:)]);
+                NSArray *keys = [[object allKeys] sortedArrayUsingSelector:@selector(compare:)];
+                NSLog(@"[DIAG] /auth no number, keys=%@", keys);
+                RPV2FAWriteLog([NSString stringWithFormat:@"/auth no number, keys=%@", keys]);
             } else if ([object isKindOfClass:[NSArray class]] && ((NSArray *)object).count > 0) {
                 NSLog(@"[DIAG] /auth no number, first=%@", [object[0] description]);
+                RPV2FAWriteLog([NSString stringWithFormat:@"/auth no number, first=%@", [object[0] description]]);
             }
             completionHandler([self createError:@"This Apple ID has no trusted phone number that can receive a code." :RPVInternalLoginError], nil);
             return;
         }
+        RPV2FAWriteLog([NSString stringWithFormat:@"/auth ok id=%@ mode=%@", descriptor[@"id"], descriptor[@"mode"]]);
         completionHandler(nil, descriptor);
     }];
 }
