@@ -281,6 +281,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 @property (nonatomic, readwrite) struct ccrng_state *rngState;
 #endif
 
+- (BOOL)_isRetryableGSAStatus:(long)httpCode;
+- (BOOL)_isRetryableNSURLError:(NSError *)error;
+- (NSURLSession *)_gsaEphemeralSession;
+- (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
+- (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler;
+
 @end
 
 @implementation RPVLoginImpl
@@ -465,7 +471,64 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     };
 }
 
+// GSA answers 502/503/504 while a session is being created, and 408/429 when
+// it throttles. Those are transient upstream failures, so retry them with a
+// short backoff instead of surfacing "Apple server returned HTTP 503".
+- (BOOL)_isRetryableGSAStatus:(long)httpCode {
+    switch (httpCode) {
+        case 408:
+        case 429:
+        case 500:
+        case 502:
+        case 503:
+        case 504:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+- (BOOL)_isRetryableNSURLError:(NSError *)error {
+    switch (error.code) {
+        case NSURLErrorTimedOut:
+        case NSURLErrorCannotConnectToHost:
+        case NSURLErrorNetworkConnectionLost:
+        case NSURLErrorNotConnectedToInternet:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+// Apple's GrandSlam edge drops a keep-alive connection after two requests, but
+// a sign-in issues three (lookup, complete, apptokens). Reusing a pooled
+// connection makes the third one come back as an HTML 503. Hand every GSA
+// request a throwaway session so it always opens a fresh connection.
+- (NSURLSession *)_gsaEphemeralSession {
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    config.URLCache = nil;
+    config.HTTPCookieStorage = nil;
+    config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicyNever;
+    config.HTTPShouldUsePipelining = NO;
+    config.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+    config.timeoutIntervalForRequest = 30.0;
+    config.timeoutIntervalForResource = 60.0;
+    return [NSURLSession sessionWithConfiguration:config];
+}
+
 - (void)makeRequestWithParameters:(NSDictionary*)params completion:(void (^)(NSError *err, NSDictionary *response))completionHandler {
+    [self _makeRequestWithParameters:params attempt:0 completion:completionHandler];
+}
+
+- (void)_retryGSAParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler {
+    NSTimeInterval delay = attempt == 0 ? 1.5 : (attempt == 1 ? 3.0 : 6.0);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self _makeRequestWithParameters:params attempt:attempt + 1 completion:completionHandler];
+    });
+}
+
+- (void)_makeRequestWithParameters:(NSDictionary*)params attempt:(NSUInteger)attempt completion:(void (^)(NSError *err, NSDictionary *response))completionHandler {
     NSString *internalEndpoint = @"https://gsa.apple.com/grandslam/GsService2";
     
     NSDictionary *defaultHeaders = [self defaultRequestHeaders];
@@ -490,12 +553,21 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         [request setValue:obj forHTTPHeaderField:key];
     }];
     
-    NSURLSessionTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+    NSURLSession *session = [self _gsaEphemeralSession];
+    NSURLSessionTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        // Retire this connection once the response is in; the next attempt must
+        // not inherit a connection the edge already considers spent.
+        [session finishTasksAndInvalidate];
         NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         long httpCode = httpResp ? (long)httpResp.statusCode : -1;
         NSString *diagAction = request.URL.lastPathComponent ?: @"?";
         
         if (error) {
+            if (attempt < 3 && [self _isRetryableNSURLError:error]) {
+                NSLog(@"[DIAG] GSA %@ network error %ld, retry %lu", diagAction, (long)error.code, (unsigned long)(attempt + 1));
+                [self _retryGSAParameters:params attempt:attempt completion:completionHandler];
+                return;
+            }
             completionHandler(error, nil);
         } else if (!data) {
             completionHandler(nil, nil);
@@ -522,6 +594,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
             log_debug("Response: %s", packedResponse.description.UTF8String);
             
             if (!packedResponse && (httpCode < 200 || httpCode >= 300)) {
+                if (attempt < 3 && [self _isRetryableGSAStatus:httpCode]) {
+                    NSLog(@"[DIAG] GSA %@ HTTP=%ld retryable, retry %lu", diagAction, httpCode, (unsigned long)(attempt + 1));
+                    [self _retryGSAParameters:params attempt:attempt completion:completionHandler];
+                    return;
+                }
                 NSString *msg = [NSString stringWithFormat:@"Apple server returned HTTP %ld for %@", httpCode, diagAction];
                 completionHandler([self createError:msg :(int)httpCode], nil);
                 return;
@@ -565,9 +642,13 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     
     log_debug("Request Headers: %s", httpHeaders.description.UTF8String);
     
-    // Do the request
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+    // Do the request on a throwaway connection: the edge retires a keep-alive
+    // connection after two requests, and complete/apptokens must not inherit
+    // the one this lookup used.
+    NSURLSession *session = [self _gsaEphemeralSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        [session finishTasksAndInvalidate];
         
         log_debug("Response code: %ld", (long)[(NSHTTPURLResponse*)response statusCode]);
         
