@@ -10,6 +10,7 @@
 #import "AuthKit.h"
 #import "NSData+GZIP.h"
 #import "RPVAuthentication.h"
+#import "RPVLoginImpl.h"
 
 NSString *const REClientID = @"XABBG36SBA";
 NSString *const REProtocolVersion = @"QH65B2";
@@ -103,6 +104,11 @@ NSString *const REProtocolVersion = @"QH65B2";
             long httpCode2 = httpResp2 ? (long)httpResp2.statusCode : -1;
             NSString *diagAction2 = request.URL.lastPathComponent ?: @"?";
             NSLog(@"[DIAG] DEV %@ HTTP=%ld bytes=%lu parsed=%@", diagAction2, httpCode2, (unsigned long)unpacked.length, plist ? @"YES" : @"NO");
+            RPV2FAWriteLog([NSString stringWithFormat:@"dev %@ HTTP=%ld bytes=%lu userString=%@ reason=%@ resultCode=%@",
+                            diagAction2, httpCode2, (unsigned long)unpacked.length,
+                            [plist isKindOfClass:[NSDictionary class]] ? ([plist objectForKey:@"userString"] ?: @"-") : @"-",
+                            [plist isKindOfClass:[NSDictionary class]] ? ([plist objectForKey:@"reason"] ?: @"-") : @"-",
+                            [plist isKindOfClass:[NSDictionary class]] ? ([plist objectForKey:@"resultCode"] ?: @"-") : @"-"]);
             if ([plist isKindOfClass:[NSDictionary class]]) {
                 NSLog(@"[DIAG]   keys=%@", [[[plist allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]);
                 NSLog(@"[DIAG]   userString=%@ reason=%@ resultCode=%@", [plist objectForKey:@"userString"], [plist objectForKey:@"reason"], [plist objectForKey:@"resultCode"]);

@@ -8,6 +8,10 @@
 
 #import <Foundation/Foundation.h>
 
+/// Appends a line to /var/mobile/Documents/ReProvision-2FA.log. Best effort:
+/// the device has no syslog, so this is the only way to see what Apple said.
+void RPV2FAWriteLog(NSString *message);
+
 // Error definitions
 #define RPVInternalLoginError 5000
 #define RPVInternalLogin2FARequiredTrustedDeviceError 4010
@@ -36,5 +40,9 @@ typedef void (^RPVTwoFactorResultBlock)(NSError *error);
 /// Exchanges the SRP session that requested 2FA for an app token. Only valid
 /// once the verification code has been accepted.
 - (void)fetchAppTokenForPendingTwoFactorSessionWithCompletion:(void (^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion;
+
+/// Anisette headers currently in use. Developer Services has to present the
+/// same identity the token was minted with, or it reports an expired session.
+- (NSDictionary *)currentAnisetteHeaders;
 
 @end

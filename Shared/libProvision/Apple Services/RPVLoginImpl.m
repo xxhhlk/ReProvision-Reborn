@@ -41,7 +41,7 @@ struct ccrng_state *ccDRBGGetRngState(void);
 // On this device syslog is not running and there is no `log` tool, so NSLog
 // never reaches a file. Mirror the 2FA diagnostics into a file the operator can
 // read over SSH. Kept small and best-effort; never throws.
-static void RPV2FAWriteLog(NSString *message) {
+void RPV2FAWriteLog(NSString *message) {
     if (message.length == 0) {
         return;
     }
@@ -477,6 +477,12 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
     NSLog(@"[DIAG] remote anisette OK rininfo=%@ mdlu=%@ client=%@", [json objectForKey:@"X-Apple-I-MD-RINFO"], [json objectForKey:@"X-Apple-I-MD-LU"] ? @"yes" : @"no", remoteClientInfo);
     @synchronized (self) { cachedHeaders = json; cachedAt = [NSDate date]; }
     return json;
+}
+
+// The anisette identity currently in use. Developer Services rejects a token
+// presented with a different identity than the one that minted it.
+- (NSDictionary *)currentAnisetteHeaders {
+    return [self _anisetteData];
 }
 
 - (NSDictionary *)_anisetteData {

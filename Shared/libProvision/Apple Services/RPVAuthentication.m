@@ -235,6 +235,18 @@
 }
 
 - (NSDictionary*)appleIDHeadersForRequest:(NSURLRequest*)request {
+    // Developer Services binds the session to the anisette identity that minted
+    // the token. Sending the device's own anisette here (which on this jailbreak
+    // is also a static, unusable one) makes Apple answer "Your session has
+    // expired", so reuse exactly what the login used.
+    NSDictionary *anisette = [self.loginImpl currentAnisetteHeaders];
+    if (anisette.count > 0) {
+        NSMutableDictionary *result = [anisette mutableCopy];
+        [result setObject:@"com.apple.gs.xcode.auth" forKey:@"X-Apple-App-Info"];
+        [result setObject:self.loginImpl.clientInfoOverride forKey:@"X-MMe-Client-Info"];
+        return result;
+    }
+
     if (!self.appleIDSession){
         self.appleIDSession = [[AKAppleIDSession alloc] initWithIdentifier:@"com.apple.gs.xcode.auth"];
     }
