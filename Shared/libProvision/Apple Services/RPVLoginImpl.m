@@ -326,6 +326,16 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 @property (nonatomic, strong) NSString *twoFactorPhoneNumberID;
 @property (nonatomic, strong) NSString *twoFactorPhoneDeliveryMode;
 
+// SRP session that asked for 2FA. Apple keeps it alive after the code is
+// accepted, so it is the only session that can be exchanged for an app token
+// without triggering a second 2FA prompt.
+@property (nonatomic, strong) NSData *pendingTwoFactorSessionKey;
+@property (nonatomic, strong) NSData *pendingTwoFactorSessionC;
+@property (nonatomic, strong) NSString *pendingTwoFactorIdmsToken;
+@property (nonatomic, strong) NSString *pendingTwoFactorADSID;
+@property (nonatomic, strong) NSString *pendingTwoFactorIdentity;
+@property (nonatomic, strong) NSDictionary *pendingTwoFactorClientData;
+
 #if TARGET_OS_IOS
 @property (nonatomic, readwrite) struct ccrng_state *rngState;
 #endif
@@ -345,6 +355,13 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 - (NSMutableURLRequest *)_twoFactorJSONRequestWithURL:(NSURL *)URL userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token;
 - (void)_performTwoFactorCodeRequest:(NSMutableURLRequest *)request completion:(void (^)(NSError *error))completionHandler;
 - (void)_submitPhoneVerificationCode:(NSString *)code userIdentity:(NSString *)userIdentity idmsToken:(NSString *)token completion:(RPVTwoFactorResultBlock)completionHandler;
+- (void)_requestAppTokensWithSessionKey:(NSData *)sessionKey
+                               sessionC:(NSData *)sessionC
+                              idmsToken:(NSString *)idmsToken
+                                   adsid:(NSString *)adsid
+                                    apps:(NSArray<NSString *> *)apps
+                              clientData:(NSDictionary *)clientData
+                              completion:(void (^)(NSError *error, NSString *token))completionHandler;
 
 @end
 
@@ -732,6 +749,21 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                                                                                  error:nil];
             NSDictionary *packedResponse = [response objectForKey:@"Response"];
             NSLog(@"[DIAG] GSA %@ HTTP=%ld bytes=%lu parsed=%@", diagAction, httpCode, (unsigned long)data.length, packedResponse ? @"YES" : @"NO");
+            {
+                NSDictionary *statusDict = [packedResponse isKindOfClass:[NSDictionary class]]
+                    ? [packedResponse objectForKey:@"Status"] : nil;
+                BOOL hasStatus = [statusDict isKindOfClass:[NSDictionary class]];
+                RPV2FAWriteLog([NSString stringWithFormat:@"gsa %@ HTTP=%ld bytes=%lu ec=%@ em=%@ au=%@ keys=%@",
+                                [params objectForKey:@"o"] ?: @"?",
+                                httpCode,
+                                (unsigned long)data.length,
+                                hasStatus ? ([statusDict objectForKey:@"ec"] ?: @"-") : @"-",
+                                hasStatus ? ([statusDict objectForKey:@"em"] ?: @"-") : @"-",
+                                hasStatus ? ([statusDict objectForKey:@"au"] ?: @"-") : @"-",
+                                [packedResponse isKindOfClass:[NSDictionary class]]
+                                    ? [[[packedResponse allKeys] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]
+                                    : @"-"]);
+            }
             if ([packedResponse isKindOfClass:[NSDictionary class]]) {
                 NSDictionary *st = [packedResponse objectForKey:@"Status"];
                 if ([st isKindOfClass:[NSDictionary class]]) {
@@ -1125,84 +1157,145 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
                     RPVInternalLogin2FARequiredTrustedDeviceError :
                     RPVInternalLogin2FARequiredSecondaryAuthError;
 
+                // Keep the session that asked for 2FA. Once the code is accepted
+                // Apple lets this session through, so it is the only context that
+                // can be exchanged for a token without another 2FA prompt.
+                self.pendingTwoFactorSessionKey = decryptedDict[@"sk"];
+                self.pendingTwoFactorSessionC = decryptedDict[@"c"];
+                self.pendingTwoFactorIdmsToken = idmsToken;
+                self.pendingTwoFactorADSID = adsid;
+                self.pendingTwoFactorIdentity = altDSID;
+                self.pendingTwoFactorClientData = clientData;
+
                 NSString *message = [completeResponseStatus objectForKey:@"em"] ?: @"Two-factor authentication is required";
                 NSError *responseError = [self createError:message :mode];
-                RPV2FAWriteLog([NSString stringWithFormat:@"login 2FA required mode=%d", mode]);
+                RPV2FAWriteLog([NSString stringWithFormat:@"login 2FA required mode=%d sk=%lu c=%lu", mode,
+                                (unsigned long)self.pendingTwoFactorSessionKey.length,
+                                (unsigned long)self.pendingTwoFactorSessionC.length]);
 
                 completionHandler(responseError, altDSID, nil, idmsToken);
             } else {
-            
-                NSData *completeSK = decryptedDict[@"sk"];
-                NSData *completeC = decryptedDict[@"c"];
-                
-                NSString *app = @"com.apple.gs.xcode.auth";
-                NSArray<NSString *> *apps = @[app];
+                // A session that did not ask for 2FA has no pending context.
+                self.pendingTwoFactorSessionKey = nil;
+                self.pendingTwoFactorSessionC = nil;
+                self.pendingTwoFactorIdmsToken = nil;
+                self.pendingTwoFactorADSID = nil;
+                self.pendingTwoFactorIdentity = nil;
+                self.pendingTwoFactorClientData = nil;
 
-                NSData *checksum = createAppTokensChecksum(completeSK, adsid, apps);
-                
-                // 'Tokens' response to GSA
-                semaphore = dispatch_semaphore_create(0);
-                __block NSDictionary *tokensResponse = nil;
-                [self makeRequestWithParameters:@{
-                    @"u": adsid,
-                    @"app": apps,
-                    @"c": completeC,
-                    @"t": idmsToken,
-                    @"checksum": checksum,
-                    @"cpd": clientData,
-                    @"o": @"apptokens"
-                } completion:^(NSError *err, NSDictionary *response) {
-                    if (response) {
-                        tokensResponse = response;
+                [self _requestAppTokensWithSessionKey:decryptedDict[@"sk"]
+                                            sessionC:decryptedDict[@"c"]
+                                           idmsToken:idmsToken
+                                                adsid:adsid
+                                                 apps:@[@"com.apple.gs.xcode.auth"]
+                                           clientData:clientData
+                                           completion:^(NSError *tokenError, NSString *token) {
+                    if (tokenError) {
+                        RPV2FAWriteLog([NSString stringWithFormat:@"login apptokens failed em=%@", tokenError.localizedDescription ?: @"-"]);
                     } else {
-                        completionHandler(err, nil, nil, nil);
+                        RPV2FAWriteLog(@"login apptokens ok");
                     }
-                    
-                    dispatch_semaphore_signal(semaphore);
+                    completionHandler(tokenError, altDSID, token, nil);
                 }];
-                dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-                
-                // Handle 'complete' response
-                if (!tokensResponse) {
-                    return;
-                }
-                
-                NSDictionary *tokensResponseStatus = [tokensResponse objectForKey:@"Status"];
-                if ([tokensResponseStatus objectForKey:@"ec"] &&
-                    [[tokensResponseStatus objectForKey:@"ec"] intValue] != 0) {
-                    // Error during request
-                    NSError *responseError = [self createError:[tokensResponseStatus objectForKey:@"em"]
-                                                              :[[tokensResponseStatus objectForKey:@"ec"] intValue]];
-                    RPV2FAWriteLog([NSString stringWithFormat:@"login apptokens ec=%@ em=%@", [tokensResponseStatus objectForKey:@"ec"] ?: @"-", [tokensResponseStatus objectForKey:@"em"] ?: @"-"]);
-
-                    completionHandler(responseError, nil, nil, nil);
-                    return;
-                }
-                RPV2FAWriteLog(@"login apptokens ok");
-
-                NSData *encryptedToken = tokensResponse[@"et"];
-                NSData *decryptedToken = decryptGCM(completeSK, encryptedToken);
-                if (!decryptedToken) {
-                    log_error("Could not decrypt apptoken!");
-                    NSError *error = [self createError:@"Could not decrypt apptoken" :RPVInternalLoginError];
-                    completionHandler(error, nil, nil, nil);
-                    return;
-                }
-                NSDictionary *decryptedTokDict = [NSPropertyListSerialization propertyListWithData:decryptedToken options:0 format:nil error:nil];
-                if (!decryptedTokDict) {
-                    log_error("Could not parse decrypted apptoken plist!");
-                    NSError *error = [self createError:@"Could not parse decrypted apptoken plist" : RPVInternalLoginError];
-                    completionHandler(error, nil, nil, nil);
-                    return;
-                }
-                log_debug("Decrypted token dict: %s", decryptedTokDict.description.UTF8String);
-
-                NSDictionary *tokenDict = decryptedTokDict[@"t"][app];
-                NSString *token = tokenDict[@"token"];
-                
-                completionHandler(nil, altDSID, token, nil);
             }
         }
+    }];
+}
+
+// Exchanges a completed SRP session for an Xcode services token. Split out of
+// loginWithUsername so the two-factor flow can reuse the session Apple already
+// verified instead of starting a fresh login, which would ask for 2FA again.
+- (void)_requestAppTokensWithSessionKey:(NSData *)sessionKey
+                               sessionC:(NSData *)sessionC
+                              idmsToken:(NSString *)idmsToken
+                                   adsid:(NSString *)adsid
+                                    apps:(NSArray<NSString *> *)apps
+                              clientData:(NSDictionary *)clientData
+                              completion:(void (^)(NSError *error, NSString *token))completionHandler {
+    if (sessionKey.length == 0 || sessionC.length == 0 || idmsToken.length == 0 || adsid.length == 0) {
+        completionHandler([self createError:@"The Apple authentication session is incomplete" :RPVInternalLoginError], nil);
+        return;
+    }
+
+    NSString *app = apps.firstObject;
+    NSData *checksum = createAppTokensChecksum(sessionKey, adsid, apps);
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSDictionary *tokensResponse = nil;
+    [self makeRequestWithParameters:@{
+        @"u": adsid,
+        @"app": apps,
+        @"c": sessionC,
+        @"t": idmsToken,
+        @"checksum": checksum,
+        @"cpd": clientData ?: @{},
+        @"o": @"apptokens"
+    } completion:^(NSError *err, NSDictionary *response) {
+        if (response) {
+            tokensResponse = response;
+        } else {
+            completionHandler(err, nil);
+        }
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+    if (!tokensResponse) {
+        return;
+    }
+
+    NSDictionary *status = [tokensResponse objectForKey:@"Status"];
+    if ([status objectForKey:@"ec"] && [[status objectForKey:@"ec"] intValue] != 0) {
+        NSString *message = [status objectForKey:@"em"] ?: @"Apple rejected the token request";
+        RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ec=%@ em=%@", [status objectForKey:@"ec"], message]);
+        completionHandler([self createError:message :[[status objectForKey:@"ec"] intValue]], nil);
+        return;
+    }
+
+    NSData *decryptedToken = decryptGCM(sessionKey, tokensResponse[@"et"]);
+    NSDictionary *decryptedTokDict = decryptedToken
+        ? [NSPropertyListSerialization propertyListWithData:decryptedToken options:0 format:nil error:nil]
+        : nil;
+    if (![decryptedTokDict isKindOfClass:[NSDictionary class]]) {
+        completionHandler([self createError:@"Could not read the app token Apple returned" :RPVInternalLoginError], nil);
+        return;
+    }
+
+    NSString *token = decryptedTokDict[@"t"][app][@"token"];
+    RPV2FAWriteLog([NSString stringWithFormat:@"apptokens ok tokenLen=%lu", (unsigned long)token.length]);
+    completionHandler(nil, token);
+}
+
+// After the verification code is accepted, mint a token from the session that
+// requested 2FA. Callers fall back to a fresh login if this returns an error.
+- (void)fetchAppTokenForPendingTwoFactorSessionWithCompletion:(void (^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion {
+    NSData *sessionKey = self.pendingTwoFactorSessionKey;
+    NSData *sessionC = self.pendingTwoFactorSessionC;
+    NSString *idmsToken = self.pendingTwoFactorIdmsToken;
+    NSString *adsid = self.pendingTwoFactorADSID;
+    NSString *identity = self.pendingTwoFactorIdentity;
+    NSDictionary *clientData = self.pendingTwoFactorClientData;
+
+    if (sessionKey.length == 0 || sessionC.length == 0 || idmsToken.length == 0 || adsid.length == 0) {
+        completion([self createError:@"The Apple authentication session is incomplete" :RPVInternalLoginError], nil, nil);
+        return;
+    }
+
+    RPV2FAWriteLog([NSString stringWithFormat:@"apptokens pending sk=%lu c=%lu adsid=%.6s",
+                    (unsigned long)sessionKey.length, (unsigned long)sessionC.length, adsid.UTF8String ?: ""]);
+
+    [self _requestAppTokensWithSessionKey:sessionKey
+                                sessionC:sessionC
+                               idmsToken:idmsToken
+                                    adsid:adsid
+                                     apps:@[@"com.apple.gs.xcode.auth"]
+                               clientData:clientData
+                               completion:^(NSError *error, NSString *token) {
+        if (error || token.length == 0) {
+            completion(error ?: [self createError:@"Apple did not return an app token" :RPVInternalLoginError], nil, nil);
+            return;
+        }
+        completion(nil, identity, token);
     }];
 }
 
@@ -1729,9 +1822,10 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
         NSLog(@"[DIAG] 2FA submit appleCode=%ld msg=%@", (long)appleCode, appleMessage ?: @"-");
 
         if (httpCode >= 200 && httpCode < 300 && appleCode == 0) {
-            // The 2FA session is finished; drop its attestation so the follow-up
-            // login is not treated as a replay ("Your session has expired").
-            RPVAnisetteRefreshRequested = YES;
+            // Keep the same attestation for the follow-up login. Refreshing it
+            // here makes Apple treat the next SRP login as an unknown device and
+            // ask for 2FA all over again.
+            RPV2FAWriteLog(@"2FA submit accepted, keeping anisette for follow-up login");
             completionHandler(nil);
             return;
         }

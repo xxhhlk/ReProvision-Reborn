@@ -33,4 +33,8 @@ typedef void (^RPVTwoFactorResultBlock)(NSError *error);
 
 - (void)submitTwoFactorCode:(NSString*)code withUserIdentity:(NSString*)userIdentity idmsToken:(NSString*)token andCompletion:(RPVTwoFactorResultBlock)completionHandler;
 
+/// Exchanges the SRP session that requested 2FA for an app token. Only valid
+/// once the verification code has been accepted.
+- (void)fetchAppTokenForPendingTwoFactorSessionWithCompletion:(void (^)(NSError *error, NSString *userIdentity, NSString *gsToken))completion;
+
 @end

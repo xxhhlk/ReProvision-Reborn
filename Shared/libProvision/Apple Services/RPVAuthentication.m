@@ -183,13 +183,22 @@
             return;
         }
 
-        // The verification context is consumed; finish with a bounded login retry.
-        NSString *username = [self.cachedUserIdentityFor2FA componentsSeparatedByString:@"|"].lastObject;
-        NSString *password = [self.cachedUserPasswordFor2FA copy];
-        [self _finishTwoFactorLoginWithUsername:username
-                                       password:password
-                               remainingRetries:2
-                                     completion:completion];
+        // The session that requested 2FA is the one Apple just verified, so ask
+        // it for the token directly. A fresh login would trigger a new prompt.
+        [self.loginImpl fetchAppTokenForPendingTwoFactorSessionWithCompletion:^(NSError *tokenError, NSString *userIdentity, NSString *gsToken) {
+            if (tokenError == nil && gsToken.length > 0) {
+                [self _clearTwoFactorSession];
+                completion(nil, userIdentity, gsToken);
+                return;
+            }
+
+            NSString *username = [self.cachedUserIdentityFor2FA componentsSeparatedByString:@"|"].lastObject;
+            NSString *password = [self.cachedUserPasswordFor2FA copy];
+            [self _finishTwoFactorLoginWithUsername:username
+                                           password:password
+                                   remainingRetries:2
+                                         completion:completion];
+        }];
     }];
 }
 
