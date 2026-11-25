@@ -361,14 +361,11 @@ static NSString *RPVNormalizedVerificationCode(NSString *code) {
 }
 
 - (NSDictionary *)_remoteAnisetteHeaders {
-    // Remote anisette is only used on iOS 17+. On older systems the device's
-    // own AuthKit keeps the login, 2FA, and token-issuance identities
-    // consistent; a remote identity would diverge from the on-device 2FA
-    // session and make an otherwise valid login look expired.
-    NSOperatingSystemVersion remoteAnisetteVersion = {17, 0, 0};
-    if (![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:remoteAnisetteVersion]) {
-        return nil;
-    }
+    // The device's own AuthKit anisette is unusable here: AKD cannot reach its
+    // ADI keys on this jailbreak, so every request comes back with the same
+    // X-Apple-I-MD-M value. Apple rejects that as an invalid attestation
+    // (-22410 / -80046), so prefer a remote Mac anisette and only fall back to
+    // the device when the server is unreachable.
     static NSDictionary *cachedHeaders = nil;
     static NSDate *cachedAt = nil;
     @synchronized (self) {
